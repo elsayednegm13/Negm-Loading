@@ -737,3 +737,60 @@ class TestWindowsUninstallChain(unittest.TestCase):
             self.assertEqual(result["exit_code"], safety.EXIT_PARTIAL)
             self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
             self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+
+    def test_cmd_does_not_kill_foreign_process_inside_root(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        system_root = os.environ.get("SystemRoot")
+        source = os.path.join(system_root or r"C:\Windows", "System32", "cmd.exe")
+        if not os.path.isfile(source):
+            self.skipTest("cmd.exe was not available to spawn a synthetic process")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            _install_owned(root, {"owned.exe": b"payload"})
+            foreign = os.path.join(root, "foreign-tool.exe")
+            shutil.copyfile(source, foreign)
+            child = subprocess.Popen(
+                [foreign, "/d", "/c", "ping -n 30 127.0.0.1 >nul"],
+                cwd=tmp,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                self.assertIsNone(child.poll())
+                proc = _run_uninstall_cmd(root)
+                self.assertIsNone(child.poll(), "a foreign process inside the install root was terminated")
+                self.assertEqual(proc.returncode, safety.EXIT_PARTIAL, proc.stdout + proc.stderr)
+                self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+                self.assertTrue(os.path.isfile(foreign))
+                self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            finally:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(child.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                child.wait(timeout=10)
+
+    def test_cmd_final_cleanup_failure_is_not_success(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            locked = _lock_exclusive(link)
+            try:
+                proc = _run_uninstall_cmd(root)
+            finally:
+                _unlock(locked)
+            self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
+            self.assertNotEqual(proc.returncode, safety.EXIT_OK)
+            self.assertIn("final cleanup failed", (proc.stdout or "").lower())
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertTrue(os.path.isfile(link))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))

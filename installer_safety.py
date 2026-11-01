@@ -31,6 +31,7 @@ ANCHOR_VALUE_NAME = "InstallAnchor"
 EXIT_OK = 0
 EXIT_VERIFY_FAILED = 2
 EXIT_PARTIAL = 3
+EXIT_FINAL = 4
 RECOVERY_FILENAMES = frozenset({
     MANIFEST_FILENAME,
     UNINSTALL_CMD_FILENAME,
@@ -581,15 +582,19 @@ def retire_matching_anchor(anchor_key, install_root):
     try:
         anchor = read_install_anchor(anchor_key)
     except InstallSafetyError:
-        return False
+        return True
     if os.path.normcase(os.path.abspath(anchor["install_location"])) != os.path.normcase(os.path.abspath(install_root)):
-        return False
+        return True
     for path in (anchor_key + "\\Run", anchor_key):
         try:
             winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
         except OSError:
-            continue
-    return True
+            pass
+    try:
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, anchor_key)
+    except OSError:
+        return True
+    return False
 
 
 def _new_result():
@@ -752,8 +757,8 @@ def safe_uninstall(install_root, expected_app_name=DEFAULT_APP_NAME, anchor_key=
     if result["preserved"] or (os.path.isdir(root) and _non_recovery_entries(root)):
         return _stop_uninstall(
             result,
-            EXIT_PARTIAL,
-            "MANUAL CLEANUP REQUIRED: recovery files could not be retired.",
+            EXIT_FINAL,
+            "MANUAL CLEANUP REQUIRED: payload was removed but recovery files remain. Exit code 4.",
         )
 
     if manifest.get("created_root") is True and os.path.isdir(root) and not is_reparse_point(root):
@@ -761,13 +766,25 @@ def safe_uninstall(install_root, expected_app_name=DEFAULT_APP_NAME, anchor_key=
             if not os.listdir(root):
                 os.rmdir(root)
                 result["root_removed"] = True
+            if os.path.isdir(root):
+                return _stop_uninstall(
+                    result,
+                    EXIT_FINAL,
+                    "MANUAL CLEANUP REQUIRED: payload was removed but the install folder remains. Exit code 4.",
+                )
         except OSError:
-            result["manual_cleanup"] = True
-            result["exit_code"] = EXIT_PARTIAL
-            result["message"] = "MANUAL CLEANUP REQUIRED: install root could not be removed"
-            return result
+            return _stop_uninstall(
+                result,
+                EXIT_FINAL,
+                "MANUAL CLEANUP REQUIRED: payload was removed but the install folder remains. Exit code 4.",
+            )
 
-    retire_matching_anchor(anchor_key, root)
+    if not retire_matching_anchor(anchor_key, root):
+        return _stop_uninstall(
+            result,
+            EXIT_FINAL,
+            "MANUAL CLEANUP REQUIRED: payload was removed but the install anchor remains. Exit code 4.",
+        )
     result["anchor_kept"] = False
     result["exit_code"] = EXIT_OK
     result["manual_cleanup"] = False
@@ -805,29 +822,42 @@ def _powershell_uninstaller(app_name, anchor_key=None, run_key=None, shortcut_pa
 
 
 _CMD_TEMPLATE = """@echo off\r
-setlocal EnableExtensions\r
+setlocal EnableExtensions EnableDelayedExpansion\r
 title Removing __APP_NAME__...\r
-rem Exit 0: payload removed and no unrelated files remain. Recovery files retired.\r
+rem Exit 0: payload removed, final cleanup verified, recovery files retired.\r
 rem Exit 2: verification failed. No files, shortcuts, or registry values were removed.\r
-rem Exit 3: removal incomplete. Manifest, uninstall scripts, shortcuts, and the anchor were kept.\r
-rem Any other code: the helper did not finish. Recovery files were kept.\r
+rem Exit 3: payload removal incomplete. Manifest, scripts, shortcuts, and the anchor were kept.\r
+rem Exit 4: payload was removed but final cleanup could not be verified.\r
 if not exist \"%~dp0__PS1__\" (\r
   echo MANUAL CLEANUP REQUIRED: missing uninstall helper. Exit code 2.\r
   exit /b 2\r
 )\r
 \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0__PS1__\"\r
 set \"EC=%ERRORLEVEL%\"\r
-if \"%EC%\"==\"0\" (\r
-  echo __APP_NAME__ owned files were removed.\r
-  for %%I in (\"%~dp0.\") do set \"INSTALL_ROOT=%%~fI\"\r
-  cd /d \"%TEMP%\"\r
-  if exist \"%INSTALL_ROOT%\\__PS1__\" del /f /q \"%INSTALL_ROOT%\\__PS1__\"\r
-  del /f /q \"%INSTALL_ROOT%\\uninstall.cmd\"\r
-  if \"__CREATED_ROOT__\"==\"1\" rmdir \"%INSTALL_ROOT%\"\r
-  exit /b 0\r
-)\r
+if \"%EC%\"==\"0\" goto Finalize\r
+if \"%EC%\"==\"4\" goto FinalReported\r
 echo MANUAL CLEANUP REQUIRED: uninstall stopped before completion. Manifest and uninstall scripts were kept. Exit code %EC%.\r
 exit /b %EC%\r
+:Finalize\r
+for %%I in (\"%~dp0.\") do set \"INSTALL_ROOT=%%~fI\"\r
+cd /d \"%TEMP%\"\r
+if exist \"!INSTALL_ROOT!\\__PS1__\" del /f /q \"!INSTALL_ROOT!\\__PS1__\"\r
+if exist \"!INSTALL_ROOT!\\__PS1__\" goto HelperRemains\r
+if \"__CREATED_ROOT__\"==\"1\" (\r
+  dir /b /a \"!INSTALL_ROOT!\" | findstr /i /v /x \"uninstall.cmd\" >nul\r
+  if not errorlevel 1 goto FolderRemains\r
+)\r
+echo __APP_NAME__ owned files were removed.\r
+exit /b 0\r
+:HelperRemains\r
+echo MANUAL CLEANUP REQUIRED: payload was removed but the uninstall helper remains. Exit code 4.\r
+exit /b 4\r
+:FolderRemains\r
+echo MANUAL CLEANUP REQUIRED: payload was removed but the install folder still holds files. Exit code 4.\r
+exit /b 4\r
+:FinalReported\r
+echo MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed. Recovery scripts were kept. Exit code 4.\r
+exit /b 4\r
 """
 
 
@@ -1022,11 +1052,30 @@ if (-not (Test-Anchor $manifest)) {
 }
 
 try {
+    $AppExeName = $AppName + '.exe'
     Get-CimInstance Win32_Process | ForEach-Object {
         $exe = [string]$_.ExecutablePath
-        if ($exe -and (Test-WithinRoot $exe)) {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($exe)) { return }
+        $leaf = [IO.Path]::GetFileName($exe)
+        if ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, $AppExeName) -ne 0) { return }
+        if (-not (Test-WithinRoot $exe)) { return }
+        if (Test-Reparse $exe) { return }
+        $parent = [IO.Path]::GetDirectoryName($exe)
+        if ([string]::IsNullOrWhiteSpace($parent)) { return }
+        $rootCmp = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+        if ([StringComparer]::OrdinalIgnoreCase.Compare($parent.TrimEnd('\'), $rootCmp) -ne 0) { return }
+        $expected = $null
+        foreach ($candidate in @($manifest.files)) {
+            if ([StringComparer]::OrdinalIgnoreCase.Compare([string]$candidate.path, $AppExeName) -eq 0) {
+                $expected = ([string]$candidate.sha256).ToLowerInvariant()
+                break
+            }
         }
+        if ([string]::IsNullOrWhiteSpace($expected)) { return }
+        try { $imageHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() }
+        catch { return }
+        if ($imageHash -ne $expected) { return }
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
 } catch {}
 
@@ -1075,22 +1124,32 @@ if ($preserved -or $left.Count -gt 0) {
 }
 
 $shell = $null
+$finalFailed = $false
 foreach ($lnkPath in @($ShortcutPaths)) {
     if ([string]::IsNullOrWhiteSpace([string]$lnkPath)) { continue }
     if (-not (Test-Path -LiteralPath $lnkPath -PathType Leaf)) { continue }
-    if (Test-Reparse $lnkPath) { continue }
+    if (Test-Reparse $lnkPath) { $finalFailed = $true; continue }
     try {
         if (-not $shell) { $shell = New-Object -ComObject WScript.Shell }
         $lnk = $shell.CreateShortcut($lnkPath)
         $target = [string]$lnk.TargetPath
-        if ($target -and (Test-WithinRoot $target)) { [IO.File]::Delete($lnkPath) }
-    } catch {}
+        if ($target -and (Test-WithinRoot $target)) {
+            [IO.File]::Delete($lnkPath)
+            if (Test-Path -LiteralPath $lnkPath) { $finalFailed = $true }
+        } elseif ([string]::IsNullOrWhiteSpace($target)) {
+            $finalFailed = $true
+        }
+    } catch {
+        $finalFailed = $true
+    }
 }
 
 try {
     $run = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($RunKey, $true)
     if ($run) {
         $val = [string]$run.GetValue($AppName)
+        $targetsUs = $false
+        $exePath = ''
         if (-not [string]::IsNullOrWhiteSpace($val)) {
             $exePath = $val.Trim()
             if ($exePath.StartsWith('"')) {
@@ -1099,26 +1158,55 @@ try {
             } else {
                 $exePath = ($exePath -split ' ', 2)[0]
             }
-            if (Test-WithinRoot $exePath) { $run.DeleteValue($AppName, $false) }
+            $targetsUs = Test-WithinRoot $exePath
+            if ($targetsUs) { $run.DeleteValue($AppName, $false) }
         }
         $run.Close()
+        if ($targetsUs) {
+            $checkRun = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($RunKey, $false)
+            if ($checkRun) {
+                $still = [string]$checkRun.GetValue($AppName)
+                $checkRun.Close()
+                if (-not [string]::IsNullOrWhiteSpace($still)) { $finalFailed = $true }
+            }
+        }
     }
-} catch {}
-
-try { if ((Test-Path -LiteralPath $ManifestPath -PathType Leaf) -and -not (Test-Reparse $ManifestPath)) { [IO.File]::Delete($ManifestPath) } } catch {}
+} catch {
+    $finalFailed = $true
+}
 
 try {
+    if ((Test-Path -LiteralPath $ManifestPath -PathType Leaf) -and -not (Test-Reparse $ManifestPath)) {
+        [IO.File]::Delete($ManifestPath)
+    }
+} catch {
+    $finalFailed = $true
+}
+if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) { $finalFailed = $true }
+
+$anchorMatched = $false
+try {
     $check = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($AnchorKey)
-    $locOk = $false
     if ($check) {
         $locVal = [string]$check.GetValue('InstallLocation')
         $check.Close()
         if ($locVal) {
-            $locOk = ([IO.Path]::GetFullPath($locVal).TrimEnd('\').ToLowerInvariant() -eq [IO.Path]::GetFullPath($Root).TrimEnd('\').ToLowerInvariant())
+            $anchorMatched = ([IO.Path]::GetFullPath($locVal).TrimEnd('\').ToLowerInvariant() -eq [IO.Path]::GetFullPath($Root).TrimEnd('\').ToLowerInvariant())
         }
     }
-    if ($locOk) { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($AnchorKey, $false) }
-} catch {}
+    if ($anchorMatched) { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($AnchorKey, $false) }
+} catch {
+    $finalFailed = $true
+}
+if ($anchorMatched) {
+    $stillAnchor = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($AnchorKey)
+    if ($stillAnchor) { $stillAnchor.Close(); $finalFailed = $true }
+}
+
+if ($finalFailed) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed. Recovery scripts were kept. Exit code 4.'
+    exit 4
+}
 
 Write-Host ($AppName + ' owned files were removed. Exit code 0.')
 exit 0
