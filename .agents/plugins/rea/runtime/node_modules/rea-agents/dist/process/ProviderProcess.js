@@ -1,0 +1,638 @@
+import { spawn } from "node:child_process";
+import { WindowsOwnedProcess } from "../windows/WindowsOwnedProcess.js";
+import { ProcessOutputTokenScanner, } from "./ProcessOutputTokenScanner.js";
+import { prepareProcessOwnershipInspection, systemProcessOwnershipHost, } from "./ProcessOwnershipObservation.js";
+import { ProcessOwnershipEvidenceOwner } from "./ProcessOwnershipEvidence.js";
+const DEFAULT_TERMINATION_GRACE_MS = 250;
+const DEFAULT_KILL_GRACE_MS = 1_000;
+const OUTPUT_CLOSE_GRACE_MS = 1_000;
+const MAX_LATE_OUTPUT_BYTES = 64 * 1024;
+const outputCheckpoints = new WeakMap();
+const incompleteCleanup = (failure) => ({
+    status: "incomplete",
+    reason: failure.reason,
+    cleanupResult: failure,
+});
+/**
+ * Spawn a provider in an owned Windows job or dedicated POSIX process group.
+ *
+ * The caller remains responsible for persisting any ownership manifest and for
+ * selecting provider-specific command arguments or environment values.
+ */
+export const spawnOwnedProviderProcess = async (options) => {
+    options.signal?.throwIfAborted();
+    await prepareProcessOwnershipInspection(options.signal);
+    options.signal?.throwIfAborted();
+    const platform = options.platform ?? process.platform;
+    const sweepTokenOwnedProcesses = options.sweepTokenOwnedProcesses === true && platform !== "win32";
+    let captureBaseline;
+    if (sweepTokenOwnedProcesses) {
+        const capture = systemProcessOwnershipHost.captureBaseline;
+        if (capture === undefined)
+            throw new Error("Process ownership baseline is unavailable on this host");
+        captureBaseline = await capture(options.signal);
+        options.signal?.throwIfAborted();
+    }
+    const hostEnvironment = options.hostEnvironment ?? process.env;
+    const environment = {
+        ...hostEnvironment,
+        ...options.env,
+        REA_PROCESS_RUN_ID: options.runId,
+    };
+    if (platform === "win32" && process.platform === "win32") {
+        const child = new WindowsOwnedProcess(options.command, options.arguments, options.cwd, environment, options.windowsVerbatimArguments ?? false, {
+            protocolStdin: options.stdin === "pipe",
+            ...(options.memoryLimitBytes === undefined
+                ? {}
+                : { memoryLimitBytes: options.memoryLimitBytes }),
+        });
+        return {
+            process: child,
+            ownership: {
+                runId: options.runId,
+                leaderPid: child.pid,
+                processGroupId: child.pid,
+                expectedParentPid: process.pid,
+            },
+            cleanup: () => child.cleanup(),
+        };
+    }
+    if (options.memoryLimitBytes !== undefined)
+        throw new Error("Owned process memory limits require the Windows Job Object launcher; no limit can be enforced on this host.");
+    const child = spawn(options.command, [...options.arguments], {
+        shell: false,
+        windowsHide: true,
+        stdio: [options.stdin ?? "ignore", "pipe", "pipe"],
+        detached: platform !== "win32",
+        windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
+        env: environment,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    });
+    await waitForSpawn(child);
+    const pid = child.pid;
+    if (pid === undefined)
+        throw new Error("Provider launcher has no process ID");
+    const ownership = {
+        runId: options.runId,
+        leaderPid: pid,
+        processGroupId: pid,
+        expectedParentPid: process.pid,
+        evidenceOwner: new ProcessOwnershipEvidenceOwner(),
+        ...(sweepTokenOwnedProcesses
+            ? {
+                sweepTokenOwnedProcesses: true,
+                captureBaseline: captureBaseline,
+            }
+            : {}),
+        ...(options.expectedCommand === null
+            ? {}
+            : { expectedCommand: options.expectedCommand ?? options.command }),
+    };
+    return { process: child, ownership };
+};
+/**
+ * Supervises only generic process resources; wire protocol remains adapter-owned.
+ *
+ * Output retention is complete per stream; adapters own resource budgets. Stop
+ * first honors token-verified group cleanup when supplied, otherwise it uses a
+ * bounded TERM-to-KILL escalation for a directly owned child.
+ */
+export class ProviderProcessSupervisor {
+    launch;
+    #options;
+    #stdout = new ProcessOutputCapture();
+    #stderr = new ProcessOutputCapture();
+    #exit = deferred();
+    #outputClose = deferred();
+    #outputClosed = false;
+    #outputIncomplete = false;
+    #stdoutObservedBytes = 0;
+    #stderrObservedBytes = 0;
+    #diagnosticTruncated = false;
+    #stdoutMarker;
+    #stderrMarker;
+    #onStdout = (chunk) => {
+        this.#capture("stdout", this.#stdout, chunk);
+    };
+    #onStderr = (chunk) => {
+        this.#capture("stderr", this.#stderr, chunk);
+    };
+    #onStdoutEnd = () => {
+        this.#stdoutMarker?.finish();
+    };
+    #onStderrEnd = () => {
+        this.#stderrMarker?.finish();
+    };
+    #onStdoutError = (cause) => {
+        this.#recordStreamError("stdout", cause);
+    };
+    #onStderrError = (cause) => {
+        this.#recordStreamError("stderr", cause);
+    };
+    #onExit = (code, signal) => {
+        this.#recordExit(code, signal);
+    };
+    #onClose = (code, signal) => {
+        this.#recordExit(code, signal);
+        this.#outputClosed = true;
+        if (!this.#disposed)
+            this.#options.onDiagnostic?.({
+                type: "output-close",
+                snapshot: this.snapshot(),
+            });
+        this.#outputClose.resolve(undefined);
+    };
+    #onError = (cause) => {
+        this.#options.onDiagnostic?.({
+            type: "error",
+            message: cause.message,
+            cause,
+        });
+    };
+    #exitObservation;
+    #stopPromise;
+    #stopRequested = false;
+    #disposed = false;
+    #maxAggregateDiagnosticBytes;
+    #maxStreamDiagnosticBytes;
+    #outputEpoch = 0;
+    constructor(launch, options = {}) {
+        this.launch = launch;
+        this.#options = options;
+        const budget = options.maxDiagnosticBytes;
+        if (typeof budget === "number")
+            this.#maxAggregateDiagnosticBytes = budget;
+        else if (budget !== undefined)
+            this.#maxStreamDiagnosticBytes = {
+                stdout: budget.stdout,
+                stderr: budget.stderr,
+            };
+        this.#resetMarkers();
+        if (options.captureStdout !== false)
+            this.#attach(launch.process.stdout, "stdout");
+        this.#attach(launch.process.stderr, "stderr");
+        launch.process.once("exit", this.#onExit);
+        launch.process.once("close", this.#onClose);
+        launch.process.on("error", this.#onError);
+        if (launch.process.exitCode !== null || launch.process.signalCode !== null)
+            this.#recordExit(launch.process.exitCode, launch.process.signalCode);
+    }
+    /**
+     * Recorded process exit without concatenating retained stream diagnostics.
+     * Undefined until exit or close is observed.
+     */
+    observedExit() {
+        const exit = this.#exitObservation;
+        if (exit === undefined)
+            return undefined;
+        return { code: exit.code, signal: exit.signal };
+    }
+    /** Whether the process owner acknowledged output closure, separately from exit. */
+    observedOutputClose() {
+        return this.#outputClosed;
+    }
+    /** Latest retained output and exit observation, with explicit configured truncation. */
+    snapshot() {
+        const outputIncomplete = this.#outputIncomplete || this.launch.process.outputIncomplete === true;
+        return {
+            ...(this.#diagnosticTruncated || outputIncomplete
+                ? { diagnosticTruncated: true }
+                : {}),
+            stdout: this.#stdout.snapshot(this.#stdoutObservedBytes),
+            stderr: this.#stderr.snapshot(this.#stderrObservedBytes),
+            exitCode: this.#exitObservation?.code,
+            signal: this.#exitObservation?.signal,
+            ...(this.launch.process.memoryLimitReached === true
+                ? { memoryLimitReached: true }
+                : {}),
+            ...(this.#stopRequested ? { stopRequested: true } : {}),
+            ...(outputIncomplete ? { outputIncomplete: true } : {}),
+        };
+    }
+    /** Mark the current raw-byte position without copying or retaining output. */
+    checkpointOutput() {
+        const checkpoint = Object.freeze({});
+        outputCheckpoints.set(checkpoint, {
+            owner: this,
+            epoch: this.#outputEpoch,
+            stdout: this.#stdoutObservedBytes,
+            stderr: this.#stderrObservedBytes,
+        });
+        return checkpoint;
+    }
+    /** Snapshot only bytes produced after a valid checkpoint on this supervisor. */
+    snapshotOutputSince(checkpoint) {
+        const position = typeof checkpoint === "object" && checkpoint !== null
+            ? outputCheckpoints.get(checkpoint)
+            : undefined;
+        if (position === undefined ||
+            position.owner !== this ||
+            position.epoch !== this.#outputEpoch)
+            return {
+                snapshot: {
+                    stdout: { text: "", bytes: 0, observedBytes: 0 },
+                    stderr: { text: "", bytes: 0, observedBytes: 0 },
+                    exitCode: this.#exitObservation?.code,
+                    signal: this.#exitObservation?.signal,
+                    outputIncomplete: true,
+                    diagnosticTruncated: true,
+                },
+                complete: false,
+            };
+        const stdout = this.#stdout.snapshotRange(position.stdout, this.#stdoutObservedBytes);
+        const stderr = this.#stderr.snapshotRange(position.stderr, this.#stderrObservedBytes);
+        const incomplete = stdout.complete === false ||
+            stderr.complete === false ||
+            this.#outputIncomplete ||
+            this.launch.process.outputIncomplete === true;
+        return {
+            snapshot: {
+                ...(incomplete ? { diagnosticTruncated: true } : {}),
+                stdout: stdout.stream,
+                stderr: stderr.stream,
+                exitCode: this.#exitObservation?.code,
+                signal: this.#exitObservation?.signal,
+                ...(this.launch.process.memoryLimitReached === true
+                    ? { memoryLimitReached: true }
+                    : {}),
+                ...(incomplete ? { outputIncomplete: true } : {}),
+            },
+            complete: !incomplete,
+            ...this.#markersWithin(position),
+        };
+    }
+    #markersWithin(position) {
+        const stdout = this.#stdoutMarker?.latestWithin(position.stdout, this.#stdoutObservedBytes);
+        const stderr = this.#stderrMarker?.latestWithin(position.stderr, this.#stderrObservedBytes);
+        const markers = [
+            ...(stdout === undefined
+                ? []
+                : [{ stream: "stdout", ...stdout }]),
+            ...(stderr === undefined
+                ? []
+                : [{ stream: "stderr", ...stderr }]),
+        ];
+        return markers.length === 0 ? {} : { markers };
+    }
+    #resetMarkers() {
+        const marker = this.#options.outputToken;
+        this.#stdoutMarker =
+            marker === undefined ? undefined : new ProcessOutputTokenScanner(marker);
+        this.#stderrMarker =
+            marker === undefined ? undefined : new ProcessOutputTokenScanner(marker);
+    }
+    /** Begin a new observation on a retained process without retaining earlier output. */
+    resetOutput() {
+        this.#outputEpoch += 1;
+        this.#stdout.reset();
+        this.#stderr.reset();
+        this.#stdoutObservedBytes = 0;
+        this.#stderrObservedBytes = 0;
+        this.#diagnosticTruncated = false;
+        this.#resetMarkers();
+    }
+    /** Wait for process exit up to a caller-owned bounded interval. */
+    async waitForExit(timeoutMs) {
+        return waitForProcessEvent(this.#exitObservation !== undefined, this.#exit.promise, timeoutMs);
+    }
+    /** Wait until output streams close; omit the timeout to await physical completion.
+     * WindowsOwnedProcess closes only after its whole Job Object settles.
+     */
+    async waitForOutputClose(timeoutMs, signal) {
+        return waitForProcessEvent(this.#outputClosed, this.#outputClose.promise, timeoutMs, signal);
+    }
+    /** Bound additional retained bytes while still draining all later output. */
+    limitAdditionalOutputBytes(maxBytes) {
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+            throw new RangeError("Additional output limit must be a non-negative safe integer.");
+        const retained = this.#stdout.bytes + this.#stderr.bytes;
+        const requestedLimit = Math.min(Number.MAX_SAFE_INTEGER, retained + maxBytes);
+        this.#maxAggregateDiagnosticBytes =
+            this.#maxAggregateDiagnosticBytes === undefined
+                ? requestedLimit
+                : Math.min(this.#maxAggregateDiagnosticBytes, requestedLimit);
+    }
+    /** Unreference inherited output pipes without closing streams shared with descendants. */
+    unrefOutputStreams() {
+        for (const stream of [
+            this.launch.process.stdout,
+            this.launch.process.stderr,
+        ]) {
+            const unref = stream
+                ?.unref;
+            unref?.call(stream);
+        }
+    }
+    /** Share each stop attempt; incomplete cleanup retains ownership and permits retry. */
+    stop(options = {}) {
+        this.#stopRequested = true;
+        this.#stopPromise ??= this.#stop(options).then((result) => {
+            if (result.status === "incomplete")
+                this.#stopPromise = undefined;
+            return result;
+        });
+        return this.#stopPromise;
+    }
+    /** Detach capture and process listeners after an adapter releases ownership. */
+    dispose() {
+        if (this.#disposed)
+            return;
+        // Releasing capture before close cannot establish a complete output history.
+        if (!this.#outputClosed)
+            this.#outputIncomplete = true;
+        this.#disposed = true;
+        this.launch.process.stdout?.off("data", this.#onStdout);
+        this.launch.process.stdout?.off("error", this.#onStdoutError);
+        this.launch.process.stdout?.off("end", this.#onStdoutEnd);
+        this.launch.process.stderr?.off("data", this.#onStderr);
+        this.launch.process.stderr?.off("error", this.#onStderrError);
+        this.launch.process.stderr?.off("end", this.#onStderrEnd);
+        this.launch.process.off("exit", this.#onExit);
+        this.launch.process.off("close", this.#onClose);
+        this.launch.process.off("error", this.#onError);
+    }
+    /** Release event-loop references so incomplete cleanup does not prevent host exit. */
+    unref() {
+        const process = this.launch.process;
+        process.unref?.();
+        process.stdin?.unref?.();
+        process.stdout?.unref?.();
+        process.stderr?.unref?.();
+    }
+    /** Restore event-loop references when retrying supervised process cleanup. */
+    ref() {
+        const process = this.launch.process;
+        process.ref?.();
+        process.stdin?.ref?.();
+        process.stdout?.ref?.();
+        process.stderr?.ref?.();
+    }
+    async #stop(options) {
+        if (this.launch.ownsProcessLifetime) {
+            this.ref();
+            // Bound retention throughout termination and failed cleanup, including retries.
+            this.limitAdditionalOutputBytes(MAX_LATE_OUTPUT_BYTES);
+        }
+        let completed = false;
+        try {
+            const result = await this.#stopWithin(options);
+            completed = result.status !== "incomplete";
+            if (completed && result.status !== "not-owned" && !this.#outputClosed) {
+                // Exit proves process lifetime only. Bound final retention while draining
+                // inherited pipes; a lost output tail does not revoke verified cleanup.
+                if (!(await this.waitForOutputClose(OUTPUT_CLOSE_GRACE_MS))) {
+                    this.#outputIncomplete = true;
+                    this.unref();
+                }
+            }
+            if (!completed)
+                this.unref();
+            return result;
+        }
+        finally {
+            if (completed)
+                this.dispose();
+        }
+    }
+    async #stopWithin(options) {
+        try {
+            if (!this.launch.ownsProcessLifetime)
+                return { status: "not-owned" };
+            if (this.launch.cleanup !== undefined) {
+                const graceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+                const exitObservedBeforeCleanup = this.#exitObservation !== undefined;
+                const cleanup = await this.#ownedCleanup(options.cleanupResult);
+                if (!cleanup.cleaned) {
+                    // Process tables can show the launcher mid-exit until verification
+                    // gives up. The supervisor's own exit observation is positive proof
+                    // that verification lacked, so verify again only after it arrives.
+                    if (exitObservedBeforeCleanup || !(await this.waitForExit(graceMs)))
+                        return incompleteCleanup(cleanup);
+                    const settled = await this.launch.cleanup();
+                    return settled.cleaned
+                        ? { status: "verified-cleanup" }
+                        : incompleteCleanup(settled);
+                }
+                if (await this.waitForExit(graceMs))
+                    return { status: "verified-cleanup" };
+                const retried = await this.launch.cleanup();
+                if (!retried.cleaned)
+                    return incompleteCleanup(retried);
+                if (await this.waitForExit(graceMs))
+                    return { status: "verified-cleanup" };
+                return {
+                    status: "incomplete",
+                    reason: "verified process-group cleanup did not stop the launcher",
+                };
+            }
+            if (this.#exitObservation !== undefined)
+                return { status: "already-exited" };
+            this.#signal("SIGTERM");
+            if (await this.waitForExit(options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS))
+                return { status: "terminated" };
+            this.#signal("SIGKILL");
+            if (await this.waitForExit(options.killGraceMs ?? DEFAULT_KILL_GRACE_MS))
+                return { status: "killed" };
+            return {
+                status: "incomplete",
+                reason: "owned provider process did not exit after SIGKILL",
+            };
+        }
+        catch (cause) {
+            return {
+                status: "incomplete",
+                reason: cause instanceof Error
+                    ? cause.message
+                    : "owned provider process cleanup failed",
+            };
+        }
+    }
+    #ownedCleanup(supplied) {
+        if (supplied !== undefined)
+            return Promise.resolve(supplied);
+        const cleanup = this.launch.cleanup;
+        return cleanup === undefined
+            ? Promise.resolve({
+                cleaned: false,
+                reason: "owned provider process has no cleanup capability",
+            })
+            : cleanup();
+    }
+    #signal(signal) {
+        if (this.#exitObservation !== undefined)
+            return;
+        this.launch.process.kill(signal);
+    }
+    #attach(stream, name) {
+        if (name === "stdout") {
+            stream?.on("data", this.#onStdout);
+            stream?.on("error", this.#onStdoutError);
+            stream?.on("end", this.#onStdoutEnd);
+        }
+        else {
+            stream?.on("data", this.#onStderr);
+            stream?.on("error", this.#onStderrError);
+            stream?.on("end", this.#onStderrEnd);
+        }
+    }
+    #recordStreamError(stream, cause) {
+        this.#outputIncomplete = true;
+        this.#options.onDiagnostic?.({
+            type: "error",
+            message: `${stream} stream failed: ${cause.message}`,
+            cause,
+        });
+    }
+    #capture(stream, capture, chunk) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (stream === "stdout") {
+            this.#stdoutMarker?.scan(bytes, this.#stdoutObservedBytes);
+            this.#stdoutObservedBytes += bytes.byteLength;
+        }
+        else {
+            this.#stderrMarker?.scan(bytes, this.#stderrObservedBytes);
+            this.#stderrObservedBytes += bytes.byteLength;
+        }
+        const aggregateRemaining = this.#maxAggregateDiagnosticBytes === undefined
+            ? bytes.byteLength
+            : Math.max(0, this.#maxAggregateDiagnosticBytes -
+                this.#stdout.bytes -
+                this.#stderr.bytes);
+        const streamLimit = this.#maxStreamDiagnosticBytes?.[stream];
+        const streamRemaining = streamLimit === undefined
+            ? bytes.byteLength
+            : Math.max(0, streamLimit - capture.bytes);
+        const retained = Math.min(bytes.byteLength, aggregateRemaining, streamRemaining);
+        if (retained < bytes.byteLength)
+            this.#diagnosticTruncated = true;
+        if (retained > 0)
+            capture.append(bytes.subarray(0, retained));
+        this.#options.onDiagnostic?.({
+            type: "output",
+            stream,
+            bytes: bytes.byteLength,
+            totalBytes: stream === "stdout"
+                ? this.#stdoutObservedBytes
+                : this.#stderrObservedBytes,
+            ...(retained < bytes.byteLength ? { truncated: true } : {}),
+        });
+    }
+    #recordExit(code, signal) {
+        if (this.#exitObservation !== undefined)
+            return;
+        this.#exitObservation = { code, signal };
+        this.#exit.resolve(this.#exitObservation);
+        this.#options.onDiagnostic?.({
+            type: "exit",
+            code,
+            signal,
+            snapshot: this.snapshot(),
+        });
+    }
+}
+class ProcessOutputCapture {
+    #chunks = [];
+    #bytes = 0;
+    get bytes() {
+        return this.#bytes;
+    }
+    reset() {
+        this.#chunks.length = 0;
+        this.#bytes = 0;
+    }
+    append(chunk) {
+        this.#bytes += chunk.byteLength;
+        this.#chunks.push(Buffer.from(chunk));
+    }
+    snapshot(observedBytes) {
+        return this.#snapshotBuffer(Buffer.concat(this.#chunks, this.#bytes), observedBytes);
+    }
+    snapshotRange(start, end) {
+        const availableEnd = Math.min(end, this.#bytes);
+        const availableStart = Math.min(start, availableEnd);
+        const chunks = [];
+        let offset = 0;
+        for (const chunk of this.#chunks) {
+            const chunkEnd = offset + chunk.byteLength;
+            const from = Math.max(availableStart, offset);
+            const to = Math.min(availableEnd, chunkEnd);
+            if (to > from)
+                chunks.push(chunk.subarray(from - offset, to - offset));
+            offset = chunkEnd;
+            if (offset >= availableEnd)
+                break;
+        }
+        const buffer = Buffer.concat(chunks, availableEnd - availableStart);
+        return {
+            stream: this.#snapshotBuffer(buffer, Math.max(0, end - start)),
+            complete: start === end || (start <= this.#bytes && end <= this.#bytes),
+        };
+    }
+    #snapshotBuffer(buffer, observedBytes) {
+        const text = buffer.toString("utf8");
+        let invalidUtf8 = false;
+        try {
+            new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+        }
+        catch {
+            invalidUtf8 = true;
+        }
+        return {
+            text,
+            bytes: buffer.byteLength,
+            observedBytes,
+            ...(invalidUtf8 ? { invalidUtf8: true } : {}),
+        };
+    }
+}
+const deferred = () => {
+    let resolver;
+    const promise = new Promise((resolve) => {
+        resolver = resolve;
+    });
+    return {
+        promise,
+        resolve: (value) => {
+            resolver?.(value);
+        },
+    };
+};
+const waitForSpawn = (child) => new Promise((resolve, reject) => {
+    const onSpawn = () => {
+        child.off("error", onError);
+        resolve();
+    };
+    const onError = (cause) => {
+        child.off("spawn", onSpawn);
+        reject(cause);
+    };
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+});
+const waitForProcessEvent = async (observed, event, timeoutMs, signal) => {
+    if (observed)
+        return true;
+    if (signal?.aborted === true)
+        return false;
+    let timer;
+    let onAbort;
+    try {
+        return await Promise.race([
+            event.then(() => true),
+            new Promise((resolve) => {
+                if (timeoutMs !== undefined)
+                    timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+                if (signal !== undefined) {
+                    onAbort = () => resolve(false);
+                    signal.addEventListener("abort", onAbort, { once: true });
+                }
+            }),
+        ]);
+    }
+    finally {
+        if (timer !== undefined)
+            clearTimeout(timer);
+        if (onAbort !== undefined)
+            signal?.removeEventListener("abort", onAbort);
+    }
+};

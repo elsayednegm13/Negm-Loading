@@ -1,0 +1,79 @@
+import { binaryMetadataArchitecture } from "../../domain/binaryMetadataArchitecture.js";
+import { metadataReportSubjectFormat } from "../../domain/apple/machoTargetSelection.js";
+import { AnalysisCancelledError, AnalysisOutputError, } from "../../domain/analysisErrorCore.js";
+import { createEvidence } from "../../domain/evidence.js";
+import { rustBinarySchema, } from "../../domain/rust/rustBinary.js";
+import { inspectRustBinaryRequestSchema } from "../../domain/rust/rustBinaryQuery.js";
+import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
+import { err, ok } from "../../domain/result.js";
+import { completeProviderEvidence } from "../ProviderOperationExecution.js";
+import { requireAnalysisViewRetention, projectRetainedAnalysis, } from "../analysisView/AnalysisViewService.js";
+const OPERATION = "inspect_rust_binary";
+/** Shared exact input validation and artifact-bound Evidence for CLI and MCP. */
+export class RustBinaryService {
+    provider;
+    constructor(provider) {
+        this.provider = provider;
+    }
+    close() {
+        return this.provider.close?.() ?? Promise.resolve();
+    }
+    /** Inspect one explicitly selected file without acquiring a binary session. */
+    async inspect(rawInput, options, retention = {
+        recordEvidence: undefined,
+        evidenceById: undefined,
+    }) {
+        if (options?.signal?.aborted)
+            return err(new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }));
+        const input = inspectRustBinaryRequestSchema.safeParse(rawInput);
+        if (!input.success)
+            return err(analysisInputErrorFromIssues(OPERATION, input.error.issues, rawInput, {
+                cause: input.error,
+            }));
+        const { detail, view, ...parameters } = input.data;
+        const compact = detail === "summary" || view !== undefined;
+        if (compact) {
+            const ready = requireAnalysisViewRetention(OPERATION, retention);
+            if (!ready.ok)
+                return ready;
+        }
+        const inspected = await this.provider.inspect(parameters, options);
+        if (!inspected.ok)
+            return inspected;
+        const report = rustBinarySchema.safeParse(inspected.value);
+        if (!report.success || report.data.artifact.path !== input.data.path)
+            return err(new AnalysisOutputError(OPERATION, "Rust dependency reader returned malformed metadata or changed the selected artifact identity."));
+        const completed = completeProviderEvidence(evidenceFor(this.provider.identity, parameters, report.data), options?.signal);
+        return compact && completed.ok
+            ? projectRetainedAnalysis(completed.value, retention, view === undefined ? { kind: "summary" } : { kind: "rust", ...view })
+            : completed;
+    }
+}
+const evidenceFor = (provider, parameters, value) => {
+    const architecture = binaryMetadataArchitecture(value.architecture);
+    const section = value.auditable_metadata;
+    return createEvidence({
+        path: value.artifact.path,
+        sha256: value.artifact.sha256,
+        format: metadataReportSubjectFormat(value),
+        ...(architecture === undefined ? {} : { architecture }),
+    }, provider, {
+        operation: OPERATION,
+        parameters,
+        result: value,
+        confidence: "observed",
+        limitations: value.limitations,
+        locations: [
+            { kind: "artifact-path", path: value.artifact.path },
+            ...(section === null
+                ? []
+                : [
+                    {
+                        kind: "file-offset-range",
+                        start: section.file_offset,
+                        end: section.file_offset + section.section_bytes,
+                    },
+                ]),
+        ],
+    });
+};

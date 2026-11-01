@@ -1,0 +1,70 @@
+import { AnalysisCancelledError, AnalysisOutputError, } from "../../domain/analysisErrorCore.js";
+import { createEvidence } from "../../domain/evidence.js";
+import { inspectErlangBeamInputSchema, erlangBeamSchema, } from "../../domain/erlang/beam.js";
+import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
+import { err } from "../../domain/result.js";
+import { completeProviderEvidence } from "../ProviderOperationExecution.js";
+const OPERATION = "inspect_erlang_beam";
+/** Shared caller validation, output parsing and Evidence provenance for CLI/MCP. */
+export class BeamService {
+    provider;
+    constructor(provider) {
+        this.provider = provider;
+    }
+    close() {
+        return this.provider.close?.() ?? Promise.resolve();
+    }
+    async inspect(rawInput, options) {
+        if (options?.signal?.aborted)
+            return err(new AnalysisCancelledError(OPERATION, {
+                cause: options.signal.reason,
+            }));
+        const input = inspectErlangBeamInputSchema.safeParse(rawInput);
+        if (!input.success)
+            return err(analysisInputErrorFromIssues(OPERATION, input.error.issues, rawInput, {
+                cause: input.error,
+            }));
+        const result = await this.provider.inspect(input.data, options);
+        if (!result.ok)
+            return result;
+        const report = erlangBeamSchema.safeParse(result.value);
+        if (!report.success ||
+            report.data.artifact.path !== input.data.path ||
+            !validReport(report.data, input.data.max_chunks, input.data.max_atoms, input.data.max_file_bytes))
+            return err(new AnalysisOutputError(OPERATION, "BEAM provider returned malformed output or changed artifact identity."));
+        const value = report.data;
+        return completeProviderEvidence(createEvidence({
+            path: value.artifact.path,
+            format: "file",
+            sha256: value.artifact.sha256,
+        }, this.provider.identity, {
+            operation: OPERATION,
+            parameters: input.data,
+            result: value,
+            confidence: "observed",
+            limitations: value.limitations,
+            locations: [
+                { kind: "artifact-path", path: value.artifact.path },
+                {
+                    kind: "file-offset-range",
+                    start: value.form.location.offset,
+                    end: value.form.location.offset + value.form.location.bytes,
+                },
+            ],
+        }), options?.signal);
+    }
+}
+const validReport = (report, maxChunks, maxAtoms, maxBytes) => {
+    const inside = ({ offset, bytes }) => offset <= report.artifact.bytes - bytes;
+    if (report.artifact.bytes > maxBytes ||
+        report.coverage.examined_chunks > maxChunks ||
+        report.chunks.length > maxChunks ||
+        report.coverage.atoms > maxAtoms ||
+        (report.atoms !== null && report.atoms.length > maxAtoms))
+        return false;
+    if (!inside(report.form.location))
+        return false;
+    if (report.code !== null && !inside(report.code.instructions))
+        return false;
+    return report.chunks.every((chunk) => inside(chunk.location) && inside(chunk.payload.location));
+};

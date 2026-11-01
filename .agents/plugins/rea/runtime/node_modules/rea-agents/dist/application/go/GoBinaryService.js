@@ -1,0 +1,77 @@
+import { binaryMetadataArchitecture } from "../../domain/binaryMetadataArchitecture.js";
+import { metadataReportSubjectFormat } from "../../domain/apple/machoTargetSelection.js";
+import { AnalysisCancelledError, AnalysisOutputError, } from "../../domain/analysisErrorCore.js";
+import { createEvidence } from "../../domain/evidence.js";
+import { goBinarySchema, inspectGoBinaryInputSchema, } from "../../domain/go/goBinary.js";
+import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
+import { err, ok } from "../../domain/result.js";
+import { completeProviderEvidence } from "../ProviderOperationExecution.js";
+import { requireAnalysisViewRetention, summarizeRetainedAnalysis, } from "../analysisView/AnalysisViewService.js";
+const OPERATION = "inspect_go_binary";
+const NO_RETENTION = {
+    recordEvidence: undefined,
+    evidenceById: undefined,
+};
+/** Shared exact input validation and artifact-bound Evidence for CLI and MCP. */
+export class GoBinaryService {
+    provider;
+    constructor(provider) {
+        this.provider = provider;
+    }
+    close() {
+        return this.provider.close?.() ?? Promise.resolve();
+    }
+    /** Inspect one explicitly selected file without acquiring a binary session. */
+    async inspect(rawInput, options, retention = NO_RETENTION) {
+        if (options?.signal?.aborted)
+            return err(new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }));
+        const input = inspectGoBinaryInputSchema.safeParse(rawInput);
+        if (!input.success)
+            return err(analysisInputErrorFromIssues(OPERATION, input.error.issues, rawInput, {
+                cause: input.error,
+            }));
+        const { detail, ...providerInput } = input.data;
+        if (detail === "summary") {
+            const ready = requireAnalysisViewRetention(OPERATION, retention);
+            if (!ready.ok)
+                return ready;
+        }
+        const inspected = await this.provider.inspect(providerInput, options);
+        if (!inspected.ok)
+            return inspected;
+        const report = goBinarySchema.safeParse(inspected.value);
+        if (!report.success || report.data.artifact.path !== input.data.path)
+            return err(new AnalysisOutputError(OPERATION, "Go build-information reader returned malformed metadata or changed the selected artifact identity."));
+        const value = report.data;
+        const architecture = binaryMetadataArchitecture(value.architecture);
+        const completed = completeProviderEvidence(createEvidence({
+            path: value.artifact.path,
+            sha256: value.artifact.sha256,
+            format: metadataReportSubjectFormat(value),
+            ...(architecture === undefined ? {} : { architecture }),
+        }, this.provider.identity, {
+            operation: OPERATION,
+            parameters: providerInput,
+            result: value,
+            confidence: "observed",
+            limitations: value.limitations,
+            locations: [
+                { kind: "artifact-path", path: value.artifact.path },
+                ...(value.build_info === null
+                    ? []
+                    : [
+                        {
+                            kind: "file-offset-range",
+                            start: value.build_info.header_offset,
+                            end: value.build_info.header_offset + 32,
+                        },
+                    ]),
+            ],
+        }), options?.signal);
+        if (!completed.ok)
+            return completed;
+        return detail === "summary"
+            ? summarizeRetainedAnalysis(completed.value, retention)
+            : completed;
+    }
+}

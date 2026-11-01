@@ -1,0 +1,52 @@
+import * as t from "@babel/types";
+import { symbolicTruth, } from "./javascriptSymbolicValues.js";
+/** Shared branch decision after each value lattice establishes truth/nullishness. */
+export const logicalRightOperand = (operator, truth, nullish) => operator === "??"
+    ? nullish
+    : truth === undefined
+        ? undefined
+        : operator === "&&"
+            ? truth
+            : !truth;
+/** Whether short-circuit evaluation reaches the right operand; unknown stays unknown. */
+export const symbolicLogicalRight = (operator, left) => {
+    if (left.kind === "namespace" && left.runtimeValueUnknown)
+        return undefined;
+    if (left.kind === "union") {
+        const choices = left.values.map((value) => symbolicLogicalRight(operator, value));
+        return choices.length > 0 &&
+            choices.every((choice) => choice === choices[0])
+            ? choices[0]
+            : undefined;
+    }
+    if (operator === "??") {
+        if (left.kind === "literal")
+            return left.value === null || left.value === undefined;
+        return [
+            "function",
+            "object",
+            "namespace",
+            "array",
+            "record",
+            "loader",
+            "promise",
+            "iterator",
+        ].includes(left.kind)
+            ? false
+            : undefined;
+    }
+    const truth = symbolicTruth(left);
+    return logicalRightOperand(operator, truth, undefined);
+};
+/** Only definite synchronous exits; unsupported control flow stays unknown. */
+export const symbolicDefiniteExit = (node, depth = 0) => {
+    if (!node || depth >= 128)
+        return false;
+    if (t.isReturnStatement(node) || t.isThrowStatement(node))
+        return true;
+    if (t.isBlockStatement(node))
+        return node.body.some((child) => symbolicDefiniteExit(child, depth + 1));
+    return (t.isIfStatement(node) &&
+        symbolicDefiniteExit(node.consequent, depth + 1) &&
+        symbolicDefiniteExit(node.alternate, depth + 1));
+};

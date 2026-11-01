@@ -1,0 +1,47 @@
+import { createAnalysisExecutionEvidence } from "../domain/analysisObservation.js";
+import { AnalysisCancelledError, AnalysisCapabilityUnavailableError, AnalysisOutputError, } from "../domain/analysisErrorCore.js";
+import { parseDocuments } from "../domain/hopperValues.js";
+import { err, ok } from "../domain/result.js";
+const executionOptions = (signal) => signal === undefined ? undefined : { signal };
+/** Resolve an explicit or provider-selected document without guessing among candidates. */
+export const resolveAnalysisDocument = async (analysis, document, signal) => {
+    if (document !== undefined)
+        return ok(document);
+    if (signal?.aborted === true)
+        return err(new AnalysisCancelledError("current_document", { cause: signal.reason }));
+    const current = await analysis.execute("current_document", {}, executionOptions(signal));
+    if (!current.ok) {
+        if (!(current.error instanceof AnalysisCapabilityUnavailableError) ||
+            current.error.cleanupIncomplete)
+            return current;
+        if (signal?.aborted)
+            return err(new AnalysisCancelledError("current_document", {
+                cause: signal.reason,
+            }));
+        const listed = await analysis.execute("list_documents", {}, executionOptions(signal));
+        if (!listed.ok)
+            return listed;
+        const parsed = parseDocuments(listed.value.result);
+        if (!parsed.ok)
+            return err(new AnalysisOutputError("list_documents", "expected one document identity when resolving a headless provider", { cause: parsed.error }));
+        if (parsed.value.length !== 1)
+            return err(new AnalysisOutputError("list_documents", `expected exactly one document identity for a provider without current-document selection, received ${parsed.value.length}`));
+        const [documentName] = parsed.value;
+        if (documentName === undefined || documentName.length === 0)
+            return err(new AnalysisOutputError("list_documents", "provider returned no document identity"));
+        return completeSelection(documentName, "list_documents", listed.value, signal);
+    }
+    return typeof current.value.result === "string" &&
+        current.value.result.length > 0
+        ? completeSelection(current.value.result, "current_document", current.value, signal)
+        : err(new AnalysisOutputError("current_document", "expected a nonempty document identity string"));
+};
+/** Preserve the completed provider observation after validating document identity. */
+const completeSelection = (document, operation, execution, signal) => {
+    if (signal?.aborted)
+        return err(new AnalysisCancelledError(operation, {
+            cause: signal.reason,
+            partialObservation: createAnalysisExecutionEvidence(operation, {}, execution, "observed"),
+        }));
+    return ok(document);
+};

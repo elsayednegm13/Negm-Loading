@@ -1,0 +1,593 @@
+import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { BrowserObservationError } from "../domain/browserObservationError.js";
+import { withPlaywrightExecutionBoundary } from "./PlaywrightExecutionBoundary.js";
+import { releaseLateScenarioCommand, scenarioCommandPending, scenarioCommandTimeoutMs, withScenarioCommandDeadline, } from "./ScenarioCommandDeadline.js";
+const breakpointResponse = z.object({ breakpointId: z.string() });
+const scriptIdentifierResponse = z.object({ identifier: z.string() });
+const storageKeyResponse = z.object({ storageKey: z.string() });
+const targetInfoResponse = z.object({
+    targetInfo: z.object({ targetId: z.string() }),
+});
+const storageFrameTree = z.lazy(() => z.object({
+    frame: z.object({ id: z.string(), securityOrigin: z.string().optional() }),
+    childFrames: z.array(storageFrameTree).optional(),
+}));
+const frameTreeResponse = z.object({ frameTree: storageFrameTree });
+const STORAGE_EVENT_METHODS = new Set([
+    "Runtime.executionContextCreated",
+    "Runtime.executionContextDestroyed",
+    "Runtime.executionContextsCleared",
+    "Debugger.scriptParsed",
+    "Debugger.paused",
+    "Target.attachedToTarget",
+    "Target.detachedFromTarget",
+    "Target.receivedMessageFromTarget",
+]);
+const attachedTargetEvent = z.object({
+    sessionId: z.string(),
+    targetInfo: z.object({ type: z.string(), targetId: z.string() }),
+});
+const targetSessionEvent = z.object({ sessionId: z.string() });
+const nestedMessageEvent = z.object({
+    sessionId: z.string(),
+    message: z.string(),
+});
+const nestedProtocolMessage = z.object({
+    id: z.number().optional(),
+    method: z.string().optional(),
+    params: z.unknown().optional(),
+    result: z.unknown().optional(),
+    error: z.object({ message: z.string() }).optional(),
+});
+const executionContextEvent = z.object({
+    context: z.object({
+        id: z.number(),
+        origin: z.string(),
+        name: z.string(),
+        auxData: z.object({ frameId: z.string().optional() }).optional(),
+    }),
+});
+const scriptParsedEvent = z.object({
+    scriptId: z.string(),
+    executionContextId: z.number(),
+    url: z.string(),
+});
+const pausedEvent = z.object({
+    callFrames: z.array(z.object({
+        callFrameId: z.string(),
+        location: z.object({ scriptId: z.string() }),
+    })),
+});
+const evaluationResponse = z.object({
+    exceptionDetails: z.unknown().optional(),
+});
+const STORAGE_CLEANUP_TIMEOUT_MS = 1_000;
+/** Owns pre-script storage seeding and its CDP instrumentation for one scenario. */
+export class PlaywrightScenarioStorage {
+    cdp;
+    signal;
+    commandTimeoutMs;
+    ownsContext;
+    #seeds = new Map();
+    #initializedLocal = new Set();
+    #initializedSession = new Set();
+    #targets = new Map();
+    #replies = new Map();
+    #sourceUrl = `rea-storage-${randomUUID()}`;
+    #listeners = [];
+    #sequence = 0;
+    #generation = 0;
+    #closed = false;
+    #cleanupCompleted = false;
+    #loadingStopped = false;
+    #popupSeedCoverageUnknown = false;
+    #failure;
+    #closePromise;
+    #detachPromise;
+    #rootInitialization;
+    #work = Promise.resolve();
+    #removeListeners = () => undefined;
+    constructor(cdp, signal, commandTimeoutMs, ownsContext) {
+        this.cdp = cdp;
+        this.signal = signal;
+        this.commandTimeoutMs = commandTimeoutMs;
+        this.ownsContext = ownsContext;
+    }
+    static async create(storagePage, scenario, secrets, options = {}) {
+        const { signal, retainCleanup } = options;
+        const { context, page } = storagePage;
+        if (scenario.storage.local_storage.length === 0 &&
+            scenario.storage.session_storage.length === 0)
+            return undefined;
+        const commandTimeoutMs = scenarioCommandTimeoutMs(scenario);
+        const connection = context.newCDPSession(page);
+        let cdp;
+        try {
+            cdp = await withPlaywrightExecutionBoundary(() => withScenarioCommandDeadline(() => connection, commandTimeoutMs, "command", "Target.attachToTarget"), undefined, signal);
+        }
+        catch (cause) {
+            if (signal?.aborted === true) {
+                let detached = false;
+                const lateCleanup = async () => {
+                    let session;
+                    try {
+                        session = await connection;
+                    }
+                    catch {
+                        return;
+                    }
+                    if (!detached) {
+                        await session.detach();
+                        detached = true;
+                    }
+                };
+                const cleanup = new AnalysisCleanupLease(lateCleanup, [
+                    "browser_storage_transport",
+                ]);
+                retainCleanup?.(cleanup);
+                void withPlaywrightExecutionBoundary(() => cleanup.release(), STORAGE_CLEANUP_TIMEOUT_MS).catch(() => undefined);
+            }
+            else if (scenarioCommandPending(cause) !== undefined) {
+                const cleanup = new AnalysisCleanupLease(() => releaseLateScenarioCommand(cause), ["browser_storage_transport"]);
+                retainCleanup?.(cleanup);
+                void withPlaywrightExecutionBoundary(() => cleanup.release(), STORAGE_CLEANUP_TIMEOUT_MS).catch(() => undefined);
+            }
+            throw cause;
+        }
+        const owner = new PlaywrightScenarioStorage(cdp, signal, commandTimeoutMs, scenario.browser.mode === "launch");
+        owner.addSeeds(scenario.storage.local_storage, "local", secrets);
+        owner.addSeeds(scenario.storage.session_storage, "session", secrets);
+        return owner;
+    }
+    async initialize(page, context) {
+        const initialization = this.initializeRoot(page, context);
+        this.#rootInitialization = initialization;
+        await withPlaywrightExecutionBoundary(() => initialization, undefined, this.signal);
+    }
+    async initializeRoot(page, context) {
+        const rootInfo = targetInfoResponse.parse(await withScenarioCommandDeadline(() => this.cdp.send("Target.getTargetInfo"), this.commandTimeoutMs, "command", "Target.getTargetInfo"));
+        if (this.#closed)
+            return;
+        const root = this.createTarget(undefined, rootInfo.targetInfo.targetId, (method, params, timeoutMs = this.commandTimeoutMs) => withScenarioCommandDeadline(() => this.cdp.send(method, params), timeoutMs, "command", method));
+        this.#targets.set("", root);
+        this.listen(page, context);
+        const ready = this.initializeTarget(root);
+        root.ready = ready;
+        await ready;
+    }
+    addSeeds(blocks, kind, secrets) {
+        for (const { origin, entries } of blocks) {
+            const seed = this.#seeds.get(origin) ?? { local: [], session: [] };
+            seed[kind].push(...entries.map(({ name, value }) => [
+                name,
+                secrets.value(value),
+            ]));
+            this.#seeds.set(origin, seed);
+        }
+    }
+    listen(page, context) {
+        const browser = context.browser();
+        const detached = () => this.targetDetached("");
+        page.on("close", detached);
+        context.on("close", detached);
+        browser?.on("disconnected", detached);
+        // Discovery is later than the first popup script. It cannot establish
+        // that root-session instrumentation controlled this top-level context.
+        const popup = (opened) => {
+            if (opened !== page)
+                this.#popupSeedCoverageUnknown = true;
+        };
+        if (this.ownsContext)
+            context.on("page", popup);
+        else
+            page.on("popup", popup);
+        this.#removeListeners = () => {
+            page.off("close", detached);
+            context.off("close", detached);
+            browser?.off("disconnected", detached);
+            if (this.ownsContext)
+                context.off("page", popup);
+            else
+                page.off("popup", popup);
+        };
+        for (const method of [
+            "Runtime.executionContextCreated",
+            "Runtime.executionContextDestroyed",
+            "Runtime.executionContextsCleared",
+            "Debugger.scriptParsed",
+            "Debugger.paused",
+            "Target.attachedToTarget",
+            "Target.detachedFromTarget",
+            "Target.receivedMessageFromTarget",
+        ]) {
+            const listener = (params) => this.event("", method, params);
+            this.#listeners.push({ method, listener });
+            this.cdp.on(method, listener);
+        }
+    }
+    limitations() {
+        return this.#popupSeedCoverageUnknown
+            ? [
+                "Declared non-cookie storage seeds were controlled for the selected page's instrumented frames; initialization before the first script is unknown for discovered popup top-level contexts.",
+            ]
+            : [];
+    }
+    createTarget(parentId, topLevelTargetId, send) {
+        return {
+            parentId,
+            topLevelTargetId,
+            send,
+            contexts: new Map(),
+            scripts: new Map(),
+            ready: Promise.resolve(),
+            waitingForDebugger: false,
+        };
+    }
+    async initializeTarget(target) {
+        if (this.#closed)
+            return;
+        await target.send("Page.enable");
+        if (this.#closed)
+            return;
+        await target.send("Runtime.enable");
+        if (this.#closed)
+            return;
+        await target.send("Debugger.enable");
+        if (this.#closed)
+            return;
+        breakpointResponse.parse(await target.send("Debugger.setBreakpointByUrl", {
+            url: this.#sourceUrl,
+            lineNumber: 1,
+        }));
+        if (this.#closed)
+            return;
+        scriptIdentifierResponse.parse(await target.send("Page.addScriptToEvaluateOnNewDocument", {
+            worldName: this.#sourceUrl,
+            source: `(() => {\n  void 0;\n})()\n//# sourceURL=${this.#sourceUrl}`,
+        }));
+        if (this.#closed)
+            return;
+        await target.send("Target.setAutoAttach", {
+            autoAttach: true,
+            waitForDebuggerOnStart: true,
+            flatten: false,
+        });
+    }
+    sendObserved(target, method, params) {
+        return withPlaywrightExecutionBoundary(() => target.send(method, params), undefined, this.signal);
+    }
+    event(sessionId, method, params) {
+        if (this.#closed)
+            return;
+        const target = this.#targets.get(sessionId);
+        if (target === undefined)
+            return;
+        try {
+            if (method === "Runtime.executionContextCreated") {
+                const { context } = executionContextEvent.parse(params);
+                if (context.name === this.#sourceUrl)
+                    target.contexts.set(context.id, context);
+            }
+            else if (method === "Runtime.executionContextDestroyed") {
+                const { executionContextId } = z
+                    .object({ executionContextId: z.number() })
+                    .parse(params);
+                target.contexts.delete(executionContextId);
+            }
+            else if (method === "Runtime.executionContextsCleared") {
+                target.contexts.clear();
+                target.scripts.clear();
+            }
+            else if (method === "Debugger.scriptParsed") {
+                const script = scriptParsedEvent.parse(params);
+                if (script.url === this.#sourceUrl)
+                    target.scripts.set(script.scriptId, script.executionContextId);
+            }
+            else if (method === "Debugger.paused") {
+                const pause = pausedEvent.parse(params);
+                const frame = pause.callFrames[0];
+                // CDP resume is target-wide, so identify our private seed frame before
+                // doing any work that will resume the paused target.
+                if (frame === undefined || !target.scripts.has(frame.location.scriptId))
+                    return;
+                this.#generation += 1;
+                this.#work = this.#work
+                    .then(() => this.seed(target, pause))
+                    .catch((cause) => {
+                    if (sessionId === "" || this.#targets.get(sessionId) === target)
+                        this.fail(cause);
+                });
+            }
+            else if (method === "Target.attachedToTarget") {
+                this.#generation += 1;
+                this.attach(sessionId, attachedTargetEvent.parse(params));
+            }
+            else if (method === "Target.detachedFromTarget") {
+                this.#generation += 1;
+                this.targetDetached(targetSessionEvent.parse(params).sessionId);
+            }
+            else if (method === "Target.receivedMessageFromTarget") {
+                this.nestedMessage(nestedMessageEvent.parse(params));
+            }
+        }
+        catch (cause) {
+            this.fail(cause);
+        }
+    }
+    nestedMessage(event) {
+        const reply = nestedProtocolMessage.parse(JSON.parse(event.message));
+        if (reply.id !== undefined) {
+            const waiter = this.#replies.get(reply.id);
+            if (waiter?.sessionId !== event.sessionId)
+                return;
+            this.#replies.delete(reply.id);
+            if (reply.error !== undefined)
+                waiter.reject(new Error(reply.error.message));
+            else
+                waiter.resolve(reply.result);
+            return;
+        }
+        if (reply.method !== undefined && STORAGE_EVENT_METHODS.has(reply.method))
+            this.event(event.sessionId, reply.method, reply.params);
+    }
+    fail(cause) {
+        this.#generation += 1;
+        // A child command deadline is already the caller-facing failure. Storing
+        // it keeps the command name, selected deadline, and recovery advice.
+        this.#failure ??=
+            cause instanceof BrowserObservationError && cause.reason === "timeout"
+                ? cause
+                : new BrowserObservationError("capture_browser_scenario", "protocol_error", { cause });
+    }
+    async seedPausedFrame(target, frame) {
+        const contextId = target.scripts.get(frame.location.scriptId);
+        const context = contextId === undefined ? undefined : target.contexts.get(contextId);
+        if (this.#closed)
+            return;
+        const frameId = context?.auxData?.frameId;
+        if (context === undefined || frameId === undefined)
+            throw new Error("The private storage seed frame has no execution context or frame identity.");
+        // Some Chrome builds leave an isolated world's origin empty. The frame's
+        // security origin is authoritative; neither its URL nor its opaque storage
+        // key establishes the document principal (for example, inherited origins).
+        const origin = context.origin === ""
+            ? await this.frameOrigin(target, frameId)
+            : context.origin;
+        const seed = this.#seeds.get(origin);
+        if (seed === undefined)
+            return;
+        const storageKey = storageKeyResponse.parse(await this.sendObserved(target, "Storage.getStorageKey", {
+            frameId,
+        })).storageKey;
+        const sessionKey = JSON.stringify([target.topLevelTargetId, storageKey]);
+        const local = this.#initializedLocal.has(storageKey) || seed.local.length === 0
+            ? []
+            : seed.local;
+        const session = this.#initializedSession.has(sessionKey) || seed.session.length === 0
+            ? []
+            : seed.session;
+        if (local.length === 0 && session.length === 0)
+            return;
+        const payload = JSON.stringify({ local, session }).replaceAll("<", "\\u003c");
+        const response = evaluationResponse.parse(await this.sendObserved(target, "Debugger.evaluateOnCallFrame", {
+            callFrameId: frame.callFrameId,
+            expression: `(() => { const seed = ${payload}; for (const [name, value] of seed.local) localStorage.setItem(name, value); for (const [name, value] of seed.session) sessionStorage.setItem(name, value); })()`,
+            returnByValue: true,
+        }));
+        if (response.exceptionDetails !== undefined)
+            throw new BrowserObservationError("capture_browser_scenario", "protocol_error", { detail: "The browser denied initial storage initialization." });
+        if (local.length > 0)
+            this.#initializedLocal.add(storageKey);
+        if (session.length > 0)
+            this.#initializedSession.add(sessionKey);
+    }
+    async frameOrigin(target, frameId) {
+        const { frameTree } = frameTreeResponse.parse(await this.sendObserved(target, "Page.getFrameTree"));
+        const pending = [frameTree];
+        while (pending.length > 0) {
+            const current = pending.pop();
+            if (current.frame.id === frameId) {
+                const origin = current.frame.securityOrigin;
+                if (origin !== undefined && origin !== "")
+                    return origin;
+                break;
+            }
+            pending.push(...(current.childFrames ?? []));
+        }
+        throw new Error("The browser did not establish the private storage seed frame's security origin.");
+    }
+    async seed(target, pause) {
+        const frame = pause.callFrames[0];
+        if (frame === undefined)
+            return;
+        let primaryFailure;
+        let hasPrimaryFailure = false;
+        try {
+            await this.seedPausedFrame(target, frame);
+        }
+        catch (cause) {
+            primaryFailure = cause;
+            hasPrimaryFailure = true;
+        }
+        let resumeFailure;
+        try {
+            await withPlaywrightExecutionBoundary(() => target.send("Debugger.resume", undefined, STORAGE_CLEANUP_TIMEOUT_MS), STORAGE_CLEANUP_TIMEOUT_MS);
+        }
+        catch (cause) {
+            resumeFailure = cause;
+        }
+        if (hasPrimaryFailure && resumeFailure !== undefined)
+            throw new AggregateError([primaryFailure, resumeFailure], "Storage initialization and debugger resume both failed", { cause: primaryFailure });
+        if (this.signal?.aborted === true && resumeFailure === undefined)
+            return;
+        if (hasPrimaryFailure)
+            throw primaryFailure;
+        if (resumeFailure !== undefined)
+            throw resumeFailure;
+    }
+    attach(parentId, event) {
+        const parent = this.#targets.get(parentId);
+        if (parent === undefined)
+            return;
+        const { sessionId, targetInfo } = event;
+        const target = this.createTarget(parentId, event.targetInfo.type === "iframe"
+            ? parent.topLevelTargetId
+            : event.targetInfo.targetId, async (method, params = {}, timeoutMs = this.commandTimeoutMs) => {
+            const id = ++this.#sequence;
+            let rejectReply;
+            const reply = new Promise((resolve, reject) => {
+                rejectReply = reject;
+                this.#replies.set(id, { sessionId, resolve, reject });
+            });
+            try {
+                const sent = parent.send("Target.sendMessageToTarget", {
+                    sessionId,
+                    message: JSON.stringify({ id, method, params }),
+                }, timeoutMs);
+                // Delivery through the root session and the nested reply share one deadline.
+                const [, result] = await withScenarioCommandDeadline(() => Promise.all([sent, reply]), timeoutMs, "command", method);
+                return result;
+            }
+            catch (cause) {
+                rejectReply?.(cause instanceof Error
+                    ? cause
+                    : new BrowserObservationError("capture_browser_scenario", "protocol_error", { cause }));
+                throw cause;
+            }
+            finally {
+                this.#replies.delete(id);
+            }
+        });
+        target.waitingForDebugger = true;
+        this.#targets.set(sessionId, target);
+        target.ready = (async () => {
+            try {
+                if (!this.#closed &&
+                    (targetInfo.type === "iframe" || targetInfo.type === "page"))
+                    await this.initializeTarget(target);
+            }
+            catch (cause) {
+                if (this.signal?.aborted !== true &&
+                    !this.#closed &&
+                    this.#targets.get(sessionId) === target)
+                    this.fail(cause);
+            }
+            if (this.#targets.get(sessionId) !== target)
+                return;
+            try {
+                await withPlaywrightExecutionBoundary(() => target.send("Runtime.runIfWaitingForDebugger", undefined, STORAGE_CLEANUP_TIMEOUT_MS), STORAGE_CLEANUP_TIMEOUT_MS);
+                target.waitingForDebugger = false;
+            }
+            catch (cause) {
+                if (this.signal?.aborted !== true &&
+                    !this.#closed &&
+                    this.#targets.get(sessionId) === target)
+                    this.fail(cause);
+            }
+        })();
+    }
+    targetDetached(sessionId) {
+        for (const [id, target] of this.#targets)
+            if (target.parentId === sessionId)
+                this.targetDetached(id);
+        this.#targets.delete(sessionId);
+        for (const [id, reply] of this.#replies)
+            if (reply.sessionId === sessionId) {
+                this.#replies.delete(id);
+                reply.reject(new BrowserObservationError("capture_browser_scenario", "disconnected"));
+            }
+        this.#generation += 1;
+    }
+    async settle() {
+        for (;;) {
+            const generation = this.#generation;
+            const work = this.#work;
+            const targets = [...this.#targets.entries()];
+            await withPlaywrightExecutionBoundary(() => Promise.all(targets.map(([, target]) => target.ready)), undefined, this.signal);
+            await withPlaywrightExecutionBoundary(() => work, undefined, this.signal);
+            await Promise.resolve();
+            if (this.#failure !== undefined)
+                throw this.#failure;
+            if (generation === this.#generation &&
+                work === this.#work &&
+                targets.every(([id, target]) => this.#targets.get(id) === target))
+                return;
+        }
+    }
+    close(stopLoading = false) {
+        if (this.#cleanupCompleted)
+            return Promise.resolve({ loadingStopped: this.#loadingStopped });
+        if (this.#closePromise !== undefined)
+            return this.#closePromise;
+        const closing = this.closeResources(stopLoading).catch((cause) => {
+            throw new BrowserObservationError("capture_browser_scenario", "cleanup_failed", {
+                cause,
+                cleanup: {
+                    reason: cause instanceof Error ? cause.message : String(cause),
+                    resources: ["browser_transport", "browser_storage_bootstrap"],
+                },
+            });
+        });
+        this.#closePromise = closing;
+        void closing.catch(() => {
+            if (this.#closePromise === closing)
+                this.#closePromise = undefined;
+        });
+        return closing;
+    }
+    async closeResources(stopLoading) {
+        this.#closed = true;
+        let stopLoadingFailure;
+        if (stopLoading && !this.#loadingStopped) {
+            try {
+                const root = this.#targets.get("");
+                if (root !== undefined) {
+                    await withPlaywrightExecutionBoundary(() => this.cdp.send("Page.stopLoading"), STORAGE_CLEANUP_TIMEOUT_MS);
+                    this.#loadingStopped = true;
+                }
+            }
+            catch (cause) {
+                stopLoadingFailure = { cause };
+            }
+        }
+        const work = this.#work;
+        const rootInitialization = this.#rootInitialization;
+        const targets = [...this.#targets.values()];
+        try {
+            await withPlaywrightExecutionBoundary(() => Promise.all([
+                work.catch(() => undefined),
+                ...(rootInitialization === undefined
+                    ? []
+                    : [rootInitialization.catch(() => undefined)]),
+                ...targets.map((target) => target.ready.catch(() => undefined)),
+            ]), STORAGE_CLEANUP_TIMEOUT_MS);
+        }
+        catch {
+            // Detaching the owning CDP session below is the terminal release for
+            // scripts, breakpoints, debugger state, and attached child sessions.
+        }
+        let detach = this.#detachPromise;
+        if (detach === undefined) {
+            detach = Promise.resolve().then(() => this.cdp.detach());
+            this.#detachPromise = detach;
+            void detach.catch(() => {
+                if (this.#detachPromise === detach)
+                    this.#detachPromise = undefined;
+            });
+        }
+        await withPlaywrightExecutionBoundary(() => detach, STORAGE_CLEANUP_TIMEOUT_MS);
+        for (const { method, listener } of this.#listeners)
+            this.cdp.off(method, listener);
+        this.#removeListeners();
+        for (const reply of this.#replies.values())
+            reply.reject(new BrowserObservationError("capture_browser_scenario", "disconnected"));
+        this.#targets.clear();
+        this.#replies.clear();
+        this.#cleanupCompleted = true;
+        if (stopLoadingFailure !== undefined)
+            throw stopLoadingFailure.cause;
+        return { loadingStopped: this.#loadingStopped };
+    }
+}

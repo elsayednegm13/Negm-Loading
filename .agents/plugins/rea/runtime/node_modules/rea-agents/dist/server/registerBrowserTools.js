@@ -1,0 +1,71 @@
+import { projectRetainedAnalysis, requireAnalysisViewRetention, } from "../application/analysisView/AnalysisViewService.js";
+import { optionalProviderUnavailable, } from "../application/OptionalObservationProviders.js";
+import { err } from "../domain/result.js";
+import { analyzeWebBundle, captureWebScreenshot, compareWebCaptureEvidence, compareWebScreenshotEvidence, discoverWebMcpTools, inspectWebPage, listBrowserTargets, observeWebSession, } from "../application/BrowserObservationService.js";
+import { toolContract } from "../contracts/toolContracts.js";
+import { mcpProgressReporter } from "./mcpProgress.js";
+import { logToolExecution } from "./toolLogging.js";
+import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
+import { runAdmittedToolOperation } from "./admittedToolOperation.js";
+import { deliverEvidenceResult } from "./contractToolHandler.js";
+/** Register browser tools with execution-time provider diagnostics. */
+// oxlint-disable-next-line max-lines-per-function -- direct SDK calls retain each schema-handler type correlation.
+export const registerBrowserTools = (server, options) => {
+    const registration = { ...options, delivery: server.delivery, server };
+    const listContract = toolContract("list_browser_targets");
+    const inspectContract = toolContract("inspect_web_page");
+    const analyzeContract = toolContract("analyze_web_bundle");
+    const sessionContract = toolContract("observe_web_session");
+    const webMcpContract = toolContract("discover_webmcp_tools");
+    const captureDiffContract = toolContract("compare_web_captures");
+    const screenshotContract = toolContract("capture_web_screenshot");
+    const screenshotDiffContract = toolContract("compare_web_screenshots");
+    server.registerTool(listContract.name, toolRegistrationOptions(listContract), (input, context) => runBrowserTool(registration, listContract, { input, context }, (parsed, { signal }) => listBrowserTargets(options.browser, parsed, {
+        signal,
+    })));
+    server.registerTool(inspectContract.name, toolRegistrationOptions(inspectContract), (input, context) => runBrowserTool(registration, inspectContract, { input, context }, (parsed, { signal, progress }) => inspectWebPage(options.browser, parsed, { signal, progress })));
+    server.registerTool(analyzeContract.name, toolRegistrationOptions(analyzeContract), (input, context) => runBrowserTool(registration, analyzeContract, { input, context }, async ({ detail, view, ...request }, { signal, progress }) => {
+        const retention = {
+            recordEvidence: options.recordEvidence,
+            evidenceById: options.evidenceById,
+        };
+        if (detail === "summary") {
+            const ready = requireAnalysisViewRetention(analyzeContract.name, retention);
+            if (!ready.ok)
+                return ready;
+        }
+        const analyzed = await analyzeWebBundle(options.browser, request, {
+            signal,
+            progress,
+        });
+        return analyzed.ok && view !== undefined
+            ? projectRetainedAnalysis(analyzed.value, retention, view)
+            : analyzed;
+    }));
+    server.registerTool(sessionContract.name, toolRegistrationOptions(sessionContract), (input, context) => runBrowserTool(registration, sessionContract, { input, context }, (parsed, { signal, progress }) => observeWebSession(options.browser, parsed, {
+        signal,
+        progress,
+    })));
+    server.registerTool(webMcpContract.name, toolRegistrationOptions(webMcpContract), (input, context) => runBrowserTool(registration, webMcpContract, { input, context }, (parsed, { signal, progress }) => discoverWebMcpTools(options.browser, parsed, {
+        signal,
+        progress,
+    })));
+    server.registerTool(captureDiffContract.name, toolRegistrationOptions(captureDiffContract), (input, context) => runBrowserTool(registration, captureDiffContract, { input, context }, (parsed) => compareWebCaptureEvidence(options.browser, parsed)));
+    server.registerTool(screenshotContract.name, toolRegistrationOptions(screenshotContract), (input, context) => runBrowserTool(registration, screenshotContract, { input, context }, (parsed, { signal, progress }) => captureWebScreenshot(options.browser, parsed, {
+        signal,
+        progress,
+    })));
+    server.registerTool(screenshotDiffContract.name, toolRegistrationOptions(screenshotDiffContract), (input, context) => runBrowserTool(registration, screenshotDiffContract, { input, context }, (parsed) => compareWebScreenshotEvidence(options.browser, parsed)));
+};
+const runBrowserTool = async (options, contract, request, execute) => {
+    const { input, context } = request;
+    if (options.loadFailure !== undefined)
+        return options.delivery.toCallToolResult(err(optionalProviderUnavailable(options.loadFailure, contract.name)), contract);
+    return runAdmittedToolOperation(options.server, options.withAdmittedAnalysis, contract.name, context.mcpReq.signal, async () => {
+        const result = await logToolExecution(options.logger, contract.name, () => execute(input, {
+            signal: context.mcpReq.signal,
+            progress: mcpProgressReporter(context),
+        }));
+        return deliverEvidenceResult(options.server, result, contract, options.recordEvidence);
+    });
+};

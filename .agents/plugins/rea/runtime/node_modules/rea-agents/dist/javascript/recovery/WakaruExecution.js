@@ -1,0 +1,132 @@
+import { join } from "node:path";
+import { createAnalysisExecution, } from "../../application/AnalysisProvider.js";
+import { AnalysisArtifactChangedError, AnalysisCapabilityUnavailableError, } from "../../domain/analysisErrorCore.js";
+import { jsonValueSchema } from "../../domain/jsonValue.js";
+import { fingerprintRecoveryFile, inventoryRecoveryFiles, readRecoveryFile, } from "./RecoveryFiles.js";
+import { runWakaruCommand, } from "./WakaruCommand.js";
+import { parseWakaruReports } from "./WakaruReport.js";
+import { publishWakaruArtifacts } from "./WakaruPublication.js";
+import { RECOVERY_LIMITS, WAKARU_PROVIDER_IDENTITY } from "./WakaruRelease.js";
+import { admitWakaruVersion } from "./WakaruVersion.js";
+const OPERATION = "recover_javascript_sources";
+const MODES = {
+    structural: "strict",
+    heuristic: "auto",
+    inspection: "inspect",
+};
+/** Consume the pinned producer representation in a private workspace. */
+const executeWakaruRecovery = async (context) => {
+    const { root, input, sources, engine, environment, launcher, options, resources, } = context;
+    const staging = join(root, "modules");
+    const commandContext = {
+        ...engine,
+        cwd: root,
+        deadline: context.deadline,
+        environment: environment,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        ...(launcher === undefined ? {} : { launcher: launcher }),
+        resources,
+    };
+    const version = await runWakaruCommand({
+        ...commandContext,
+        arguments: ["--version"],
+    });
+    const admitted = version.exit_code === 0
+        ? admitWakaruVersion(version.stdout.trim())
+        : undefined;
+    if (admitted === undefined || admitted.status === "unsupported") {
+        // The message names the mismatch; the reason also keeps the tool's stderr.
+        const mismatch = `${admitted?.message ?? `Wakaru --version failed; reported version: ${version.stdout.trim()}`}; exit: ${String(version.exit_code)}`;
+        throw new AnalysisCapabilityUnavailableError("wakaru", OPERATION, `${mismatch}; stderr: ${version.stderr}`, { userMessage: `${mismatch}.` });
+    }
+    const run = await runWakaruCommand({
+        ...commandContext,
+        staging,
+        arguments: [
+            ...sources.map((source) => source.snapshot_path),
+            `--unpack=${MODES[input.extraction_mode]}`,
+            `--level=${input.rewrite_level}`,
+            "--provenance",
+            "--emit-source-map",
+            "--json",
+            "-o",
+            staging,
+        ],
+    });
+    const files = await inventoryRecoveryFiles(staging, options?.signal, resources);
+    const snapshots = new Map();
+    for (const source of sources)
+        snapshots.set(source.snapshot_path, await readRecoveryFile(source.snapshot_path, source.bytes, options?.signal, resources));
+    const parsed = await parseWakaruReports({
+        execution: run,
+        provenancePath: join(staging, "provenance.json"),
+        snapshots,
+        files,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        resources,
+    });
+    return { version, admitted, run, parsed };
+};
+/** Publish validated recovery and retain exact source and engine bindings. */
+export const prepareWakaruExecution = async (context) => {
+    const { root, tree, input, sources, engine, options, resources } = context;
+    const [source] = sources;
+    const staging = join(root, "modules");
+    const { version, admitted, run, parsed } = await executeWakaruRecovery(context);
+    const result = await publishWakaruArtifacts({
+        tree,
+        staging,
+        input,
+        sources,
+        engine,
+        admitted,
+        parsed,
+        execution: run,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        resources,
+    });
+    for (const selected of sources) {
+        const current = await fingerprintRecoveryFile(selected.path, RECOVERY_LIMITS.inputBytes, options?.signal, resources);
+        if (current.sha256 !== selected.sha256 || current.bytes !== selected.bytes)
+            throw new AnalysisArtifactChangedError(OPERATION, selected.path, `Original input changed during recovery: ${selected.path}`, {
+                diagnostics: {
+                    expected_sha256: selected.sha256,
+                    observed_sha256: current.sha256,
+                    expected_bytes: selected.bytes,
+                    observed_bytes: current.bytes,
+                },
+            });
+    }
+    const currentEngine = await fingerprintRecoveryFile(engine.command, RECOVERY_LIMITS.outputBytes, options?.signal, resources);
+    if (currentEngine.sha256 !== engine.sha256)
+        throw new AnalysisArtifactChangedError(OPERATION, engine.command, "Configured engine bytes changed during recovery", {
+            diagnostics: {
+                expected_sha256: engine.sha256,
+                observed_sha256: currentEngine.sha256,
+            },
+        });
+    return createAnalysisExecution(result, { ...WAKARU_PROVIDER_IDENTITY, version: admitted.version }, {
+        rawResult: jsonValueSchema.parse({
+            version,
+            execution: run,
+            report: parsed.report,
+            provenance: parsed.provenance,
+        }),
+        subject: {
+            path: source.path,
+            sha256: source.sha256,
+            format: "javascript",
+        },
+        locations: [
+            ...sources.map((selected) => ({
+                kind: "artifact-path",
+                path: selected.path,
+            })),
+            ...result.modules.map((module) => ({
+                kind: "artifact-path",
+                path: module.artifact.path,
+            })),
+        ],
+        limitations: result.limitations,
+    });
+};
