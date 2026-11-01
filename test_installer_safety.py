@@ -39,7 +39,11 @@ def _sha(path):
     return digest.hexdigest()
 
 
-def _install_owned(root, mapping, created_root=False, extra_dirs=None):
+_OPEN_KEYS = []
+
+
+def _install_owned(root, mapping, created_root=False, extra_dirs=None, shortcut_paths=None):
+    key = safety.make_test_anchor_key()
     files = []
     dirs = list(extra_dirs or [])
     for rel, content in mapping.items():
@@ -49,8 +53,31 @@ def _install_owned(root, mapping, created_root=False, extra_dirs=None):
         if parent not in (".", ""):
             dirs.append(parent.replace("/", "\\"))
         files.append({"path": rel.replace("/", "\\"), "role": "payload"})
-    safety.write_uninstall_artifacts(root, files, dirs, created_root=created_root)
-    return files
+    safety.write_uninstall_artifacts(
+        root,
+        files,
+        dirs,
+        created_root=created_root,
+        anchor_key=key,
+        run_key=key + "\\Run",
+        shortcut_paths=[] if shortcut_paths is None else list(shortcut_paths),
+    )
+    _OPEN_KEYS.append(key)
+    return key
+
+
+def tearDownModule():
+    for key in list(_OPEN_KEYS):
+        try:
+            safety.delete_test_anchor_key(key)
+        except Exception:
+            pass
+    if os.name == "nt":
+        import winreg
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, "Software\\NegmLoadingF01Test")
+        except OSError:
+            pass
 
 
 def _try_junction(link, target):
@@ -143,9 +170,9 @@ class TestManifestTrust(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "app")
             os.makedirs(root)
-            _install_owned(root, {"app.exe": b"exe"})
+            key = _install_owned(root, {"app.exe": b"exe"})
             os.remove(os.path.join(root, "app.exe"))
-            result = safety.safe_uninstall(root)
+            result = safety.safe_uninstall(root, anchor_key=key)
             self.assertIn("app.exe", result["missing"])
             self.assertFalse(os.path.isfile(os.path.join(root, "app.exe")))
 
@@ -158,13 +185,13 @@ class TestSafeUninstallOwnership(unittest.TestCase):
             user = os.path.join(root, "my homework.docx")
             payload = b"user-bytes-must-survive-exactly\n"
             _write(user, payload)
-            _install_owned(root, {
+            key = _install_owned(root, {
                 "Negm Lodaing.exe": b"app-binary",
                 "assets\\negm.ico": b"ico",
             }, created_root=False, extra_dirs=["assets"])
             with open(user, "rb") as handle:
                 before = handle.read()
-            result = safety.safe_uninstall(root)
+            result = safety.safe_uninstall(root, anchor_key=key)
             with open(user, "rb") as handle:
                 after = handle.read()
             self.assertEqual(before, after)
@@ -178,14 +205,14 @@ class TestSafeUninstallOwnership(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "app")
             os.makedirs(root)
-            _install_owned(root, {
+            key = _install_owned(root, {
                 "owned.txt": "original",
                 "other-owned.txt": "same",
             })
             _write(os.path.join(root, "owned.txt"), "user-edited")
             unknown = os.path.join(root, "new-user-file.txt")
             _write(unknown, "appeared later")
-            result = safety.safe_uninstall(root)
+            result = safety.safe_uninstall(root, anchor_key=key)
             self.assertTrue(os.path.isfile(os.path.join(root, "owned.txt")))
             with open(os.path.join(root, "owned.txt"), encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), "user-edited")
@@ -199,8 +226,8 @@ class TestSafeUninstallOwnership(unittest.TestCase):
             os.makedirs(root)
             nested_user = os.path.join(root, "photos", "img.jpg")
             _write(nested_user, b"jpeg")
-            _install_owned(root, {"app.bin": b"x"}, created_root=False)
-            safety.safe_uninstall(root)
+            key = _install_owned(root, {"app.bin": b"x"}, created_root=False)
+            safety.safe_uninstall(root, anchor_key=key)
             self.assertTrue(os.path.isdir(root))
             self.assertTrue(os.path.isfile(nested_user))
             with open(nested_user, "rb") as handle:
@@ -217,7 +244,7 @@ class TestTraversalAndReparse(unittest.TestCase):
             secret = os.path.join(outside, "secret.txt")
             _write(secret, "do-not-delete")
             before = _sha(secret)
-            _install_owned(root, {"ok.txt": "v"})
+            key = _install_owned(root, {"ok.txt": "v"})
             manifest_path = os.path.join(root, safety.MANIFEST_FILENAME)
             with open(manifest_path, encoding="utf-8") as handle:
                 data = json.loads(handle.read())
@@ -229,7 +256,7 @@ class TestTraversalAndReparse(unittest.TestCase):
             })
             with open(manifest_path, "w", encoding="utf-8") as handle:
                 json.dump(data, handle)
-            result = safety.safe_uninstall(root)
+            result = safety.safe_uninstall(root, anchor_key=key)
             self.assertTrue(result["manual_cleanup"])
             self.assertTrue(os.path.isfile(secret))
             self.assertEqual(_sha(secret), before)
@@ -240,7 +267,7 @@ class TestTraversalAndReparse(unittest.TestCase):
             os.makedirs(root)
             victim = os.path.join(tmp, "victim.txt")
             _write(victim, "alive")
-            _install_owned(root, {"ok.txt": "v"})
+            key = _install_owned(root, {"ok.txt": "v"})
             manifest_path = os.path.join(root, safety.MANIFEST_FILENAME)
             with open(manifest_path, encoding="utf-8") as handle:
                 data = json.loads(handle.read())
@@ -250,7 +277,7 @@ class TestTraversalAndReparse(unittest.TestCase):
             ]
             with open(manifest_path, "w", encoding="utf-8") as handle:
                 json.dump(data, handle)
-            safety.safe_uninstall(root)
+            safety.safe_uninstall(root, anchor_key=key)
             self.assertTrue(os.path.isfile(victim))
             with open(victim, encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), "alive")
@@ -269,7 +296,7 @@ class TestTraversalAndReparse(unittest.TestCase):
             link = os.path.join(root, "escape")
             if not _try_junction(link, outside):
                 self.skipTest("could not create directory junction")
-            _install_owned(root, {"ok.txt": "v"})
+            key = _install_owned(root, {"ok.txt": "v"})
             manifest_path = os.path.join(root, safety.MANIFEST_FILENAME)
             with open(manifest_path, encoding="utf-8") as handle:
                 data = json.loads(handle.read())
@@ -281,7 +308,7 @@ class TestTraversalAndReparse(unittest.TestCase):
             })
             with open(manifest_path, "w", encoding="utf-8") as handle:
                 json.dump(data, handle)
-            safety.safe_uninstall(root)
+            safety.safe_uninstall(root, anchor_key=key)
             self.assertTrue(os.path.isfile(secret))
             self.assertEqual(_sha(secret), before)
             self.assertTrue(os.path.lexists(link))
@@ -315,9 +342,13 @@ class TestTraversalAndReparse(unittest.TestCase):
             }
             with open(os.path.join(root, safety.MANIFEST_FILENAME), "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
-            safety.safe_uninstall(root)
+            key = safety.make_test_anchor_key()
+            _OPEN_KEYS.append(key)
+            safety.write_install_anchor(root, key)
+            safety.safe_uninstall(root, anchor_key=key)
             self.assertTrue(os.path.isfile(outside))
-            self.assertEqual(open(outside, encoding="utf-8").read(), "link-target")
+            with open(outside, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "link-target")
             self.assertTrue(os.path.lexists(link))
 
 
@@ -328,10 +359,10 @@ class TestIdempotencyAndPartial(unittest.TestCase):
             os.makedirs(root)
             user = os.path.join(root, "keep.txt")
             _write(user, "stay")
-            _install_owned(root, {"app.exe": b"x"})
-            first = safety.safe_uninstall(root)
-            second = safety.safe_uninstall(root)
-            third = safety.safe_uninstall(root)
+            key = _install_owned(root, {"app.exe": b"x"})
+            first = safety.safe_uninstall(root, anchor_key=key)
+            second = safety.safe_uninstall(root, anchor_key=key)
+            third = safety.safe_uninstall(root, anchor_key=key)
             self.assertTrue(os.path.isfile(user))
             with open(user, encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), "stay")
@@ -372,9 +403,14 @@ class TestGeneratedUninstaller(unittest.TestCase):
             self.assertNotIn("rd /s /q", text.lower())
             self.assertNotIn("Remove-Item -Recurse", text)
         self.assertIn("%~dp0", cmd)
-        self.assertIn('taskkill /F /IM "%s.exe"' % APP, cmd)
-        desktop_del = 'del /f /q "%USERPROFILE%\\Desktop\\' + APP + '.lnk"'
-        self.assertIn(desktop_del, cmd)
+        self.assertNotIn("taskkill", cmd.lower())
+        self.assertNotIn("%USERPROFILE%", cmd)
+        self.assertNotIn("reg delete", cmd.lower())
+        self.assertLess(cmd.find('if "%EC%"=="0"'), cmd.find("del /f /q"))
+        self.assertIn(safety.DEFAULT_UNINSTALL_KEY, ps1)
+        self.assertIn("InstallAnchor", ps1)
+        self.assertIn("Exit code 2", ps1)
+        self.assertIn("Exit code 3", ps1)
 
     def test_generated_script_does_not_embed_untrusted_dest(self):
         evil = r'C:\Users\Public\my folder & calc.exe & echo "'
@@ -391,7 +427,7 @@ class TestGeneratedUninstaller(unittest.TestCase):
             os.makedirs(root)
             user = os.path.join(root, "user file.txt")
             _write(user, "space-path-payload")
-            _install_owned(root, {
+            key = _install_owned(root, {
                 "Negm Lodaing.exe": b"bin",
                 "assets\\readme.txt": "docs",
             }, extra_dirs=["assets"])
@@ -408,7 +444,7 @@ class TestGeneratedUninstaller(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertNotEqual(completed.returncode, 1)
+            self.assertEqual(completed.returncode, safety.EXIT_PARTIAL, completed.stdout + "\n" + completed.stderr)
             self.assertTrue(os.path.isfile(user))
             with open(user, encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), "space-path-payload")
@@ -461,3 +497,243 @@ class TestEngineIntegration(unittest.TestCase):
         self.assertEqual(installer_engine.APP_NAME, APP)
         self.assertTrue(hasattr(installer_engine, "write_safe_uninstaller"))
         self.assertTrue(callable(getattr(installer_engine, "write_safe_uninstaller")))
+
+
+def _powershell_exe():
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                        r"System32\WindowsPowerShell\v1.0\powershell.exe")
+
+
+def _run_uninstall_cmd(root):
+    cmd = os.path.join(root, safety.UNINSTALL_CMD_FILENAME)
+    return subprocess.run(["cmd.exe", "/c", cmd], cwd=root, capture_output=True, text=True)
+
+
+def _make_shortcut(path, target):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    env = os.environ.copy()
+    env["F01_LNK"] = path
+    env["F01_TGT"] = target
+    completed = subprocess.run(
+        [_powershell_exe(), "-NoProfile", "-Command",
+         "$s=New-Object -ComObject WScript.Shell; "
+         "$l=$s.CreateShortcut($env:F01_LNK); "
+         "$l.TargetPath=$env:F01_TGT; $l.Save()"],
+        env=env, capture_output=True, text=True,
+    )
+    if completed.returncode != 0 or not os.path.isfile(path):
+        raise AssertionError(completed.stdout + completed.stderr)
+
+
+def _lock_exclusive(path):
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    handle = kernel32.CreateFileW(path, 0x80000000, 0, None, 3, 0x80, None)
+    invalid = ctypes.c_void_p(-1).value
+    if not handle or handle == invalid:
+        raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+    return handle
+
+
+def _unlock(handle):
+    import ctypes
+    ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+class TestWindowsUninstallChain(unittest.TestCase):
+    def test_cmd_missing_helper_exits_2_and_keeps_inventory(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            user = os.path.join(root, "user file.txt")
+            _write(user, "keep")
+            _install_owned(root, {"owned.exe": b"owned"})
+            os.remove(os.path.join(root, safety.UNINSTALL_PS1_FILENAME))
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_VERIFY_FAILED, proc.stdout + proc.stderr)
+            self.assertEqual(open(user, encoding="utf-8").read(), "keep")
+            self.assertTrue(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+
+    def test_cmd_corrupt_manifest_keeps_recovery(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "app folder")
+            os.makedirs(root)
+            user = os.path.join(root, "notes.txt")
+            _write(user, "notes")
+            _install_owned(root, {"owned.exe": b"owned"})
+            _write(os.path.join(root, safety.MANIFEST_FILENAME), "{not-json")
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_VERIFY_FAILED, proc.stdout + proc.stderr)
+            self.assertEqual(open(user, encoding="utf-8").read(), "notes")
+            self.assertTrue(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+
+    def test_cmd_spoofed_user_file_hash_deletes_nothing(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            outside = os.path.join(tmp, "outside.txt")
+            user = os.path.join(root, "user file.txt")
+            _write(outside, "outside-bytes")
+            _write(user, "user-bytes")
+            _install_owned(root, {"owned.exe": b"owned"})
+            manifest_path = os.path.join(root, safety.MANIFEST_FILENAME)
+            with open(manifest_path, encoding="utf-8") as handle:
+                data = json.loads(handle.read())
+            data["files"].append({
+                "path": "user file.txt",
+                "sha256": _sha(user),
+                "size": os.path.getsize(user),
+                "role": "payload",
+            })
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_VERIFY_FAILED, proc.stdout + proc.stderr)
+            self.assertEqual(open(user, encoding="utf-8").read(), "user-bytes")
+            self.assertEqual(open(outside, encoding="utf-8").read(), "outside-bytes")
+            self.assertTrue(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertTrue(os.path.isfile(manifest_path))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+
+    def test_cmd_modified_file_and_repeat_keep_recovery(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            user = os.path.join(root, "user file.txt")
+            _write(user, "stay-put")
+            shortcut = os.path.join(tmp, "links", "app.lnk")
+            _install_owned(root, {"owned.exe": b"owned", "other.exe": b"other"}, shortcut_paths=[shortcut])
+            _make_shortcut(shortcut, os.path.join(root, "owned.exe"))
+            _write(os.path.join(root, "owned.exe"), b"user-changed")
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_PARTIAL, proc.stdout + proc.stderr)
+            self.assertEqual(open(os.path.join(root, "owned.exe"), "rb").read(), b"user-changed")
+            self.assertFalse(os.path.isfile(os.path.join(root, "other.exe")))
+            self.assertEqual(open(user, encoding="utf-8").read(), "stay-put")
+            self.assertTrue(os.path.isfile(shortcut))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            again = _run_uninstall_cmd(root)
+            self.assertEqual(again.returncode, safety.EXIT_PARTIAL, again.stdout + again.stderr)
+            self.assertEqual(open(user, encoding="utf-8").read(), "stay-put")
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+
+    def test_cmd_locked_file_keeps_recovery(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "app folder")
+            os.makedirs(root)
+            _install_owned(root, {"owned.exe": b"owned-bytes"})
+            handle = _lock_exclusive(os.path.join(root, "owned.exe"))
+            try:
+                proc = _run_uninstall_cmd(root)
+            finally:
+                _unlock(handle)
+            self.assertEqual(proc.returncode, safety.EXIT_PARTIAL, proc.stdout + proc.stderr)
+            self.assertEqual(open(os.path.join(root, "owned.exe"), "rb").read(), b"owned-bytes")
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+
+    def test_cmd_success_preserves_outside_data_and_foreign_records(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            outside = os.path.join(tmp, "outside.txt")
+            _write(outside, "do-not-touch")
+            inside_lnk = os.path.join(tmp, "links", "inside.lnk")
+            outside_lnk = os.path.join(tmp, "links", "outside.lnk")
+            key = _install_owned(
+                root,
+                {"owned.exe": b"payload"},
+                created_root=True,
+                shortcut_paths=[inside_lnk, outside_lnk],
+            )
+            _make_shortcut(inside_lnk, os.path.join(root, "owned.exe"))
+            _make_shortcut(outside_lnk, outside)
+            foreign = safety.make_test_anchor_key()
+            _OPEN_KEYS.append(foreign)
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, foreign) as reg:
+                winreg.SetValueEx(reg, "Marker", 0, winreg.REG_SZ, "other-install")
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertEqual(open(outside, encoding="utf-8").read(), "do-not-touch")
+            self.assertFalse(os.path.isfile(inside_lnk))
+            self.assertTrue(os.path.isfile(outside_lnk))
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, foreign) as reg:
+                self.assertEqual(winreg.QueryValueEx(reg, "Marker")[0], "other-install")
+            with self.assertRaises(OSError):
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, key)
+
+    def test_stub_powershell_failure_does_not_delete_helper(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "app folder")
+            os.makedirs(root)
+            user = os.path.join(root, "user.txt")
+            _write(user, "keep")
+            _install_owned(root, {"owned.exe": b"x"})
+            _write(os.path.join(root, safety.UNINSTALL_PS1_FILENAME), "Write-Host 'forced'\nexit 2\n")
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_VERIFY_FAILED, proc.stdout + proc.stderr)
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+            self.assertEqual(open(user, encoding="utf-8").read(), "keep")
+            self.assertTrue(os.path.isfile(os.path.join(root, "owned.exe")))
+
+    def test_shared_root_is_not_removed_after_full_payload_removal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "shared")
+            os.makedirs(root)
+            key = _install_owned(root, {"owned.exe": b"x"}, created_root=False)
+            result = safety.safe_uninstall(root, anchor_key=key)
+            self.assertEqual(result["exit_code"], safety.EXIT_OK)
+            self.assertFalse(result["root_removed"])
+            self.assertTrue(os.path.isdir(root))
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+
+    def test_post_install_junction_swap_preserves_target(self):
+        if os.name != "nt":
+            self.skipTest("Windows junction test")
+        content = b"same-bytes"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "root")
+            outside = os.path.join(tmp, "outside")
+            os.makedirs(root)
+            os.makedirs(outside)
+            key = _install_owned(root, {"sub\\file.txt": content}, extra_dirs=["sub"])
+            shutil.rmtree(os.path.join(root, "sub"))
+            if not _try_junction(os.path.join(root, "sub"), outside):
+                self.skipTest("could not create directory junction")
+            _write(os.path.join(outside, "file.txt"), content)
+            before = _sha(os.path.join(outside, "file.txt"))
+            result = safety.safe_uninstall(root, anchor_key=key)
+            self.assertEqual(_sha(os.path.join(outside, "file.txt")), before)
+            self.assertTrue(os.path.lexists(os.path.join(root, "sub")))
+            self.assertEqual(result["exit_code"], safety.EXIT_PARTIAL)
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
