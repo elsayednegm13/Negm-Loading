@@ -780,7 +780,7 @@ class TestWindowsUninstallChain(unittest.TestCase):
             root = os.path.join(tmp, "Negm Lodaing Install")
             os.makedirs(root)
             link = os.path.join(tmp, "links", "owned.lnk")
-            _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
             _make_shortcut(link, os.path.join(root, "owned.exe"))
             locked = _lock_exclusive(link)
             try:
@@ -790,7 +790,110 @@ class TestWindowsUninstallChain(unittest.TestCase):
             self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
             self.assertNotEqual(proc.returncode, safety.EXIT_OK)
             self.assertIn("final cleanup failed", (proc.stdout or "").lower())
+            self.assertIn("retry is possible", (proc.stdout or "").lower())
             self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
             self.assertTrue(os.path.isfile(link))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
             self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
             self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+            import winreg
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+
+    def test_cmd_exit_4_keeps_recovery_and_retry_succeeds(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            user = os.path.join(tmp, "user-outside.txt")
+            _write(user, "user-bytes-v1")
+            before = _sha(user)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            locked = _lock_exclusive(link)
+            try:
+                first = _run_uninstall_cmd(root)
+            finally:
+                _unlock(locked)
+            self.assertEqual(first.returncode, safety.EXIT_FINAL, first.stdout + first.stderr)
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+            self.assertEqual(_sha(user), before)
+            second = _run_uninstall_cmd(root)
+            self.assertEqual(second.returncode, safety.EXIT_OK, second.stdout + second.stderr)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertFalse(os.path.isfile(link))
+            self.assertEqual(_sha(user), before)
+            with self.assertRaises(OSError):
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, key)
+
+    def test_cmd_readonly_manifest_keeps_anchor_for_retry(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            key = _install_owned(root, {"owned.exe": b"payload"})
+            manifest = os.path.join(root, safety.MANIFEST_FILENAME)
+            os.chmod(manifest, stat.S_IREAD)
+            try:
+                proc = _run_uninstall_cmd(root)
+                self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
+                self.assertIn("retry is possible", (proc.stdout or "").lower())
+                self.assertTrue(os.path.isfile(manifest))
+                self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+            finally:
+                os.chmod(manifest, stat.S_IWRITE)
+            again = _run_uninstall_cmd(root)
+            self.assertEqual(again.returncode, safety.EXIT_OK, again.stdout + again.stderr)
+            with self.assertRaises(OSError):
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, key)
+
+    def test_cmd_anchor_delete_denied_keeps_manifest(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            key = _install_owned(root, {"owned.exe": b"payload"})
+            env = os.environ.copy()
+            env["F01_KEY"] = "HKCU:\\" + key
+            deny = subprocess.run(
+                [_powershell_exe(), "-NoProfile", "-Command",
+                 "$ErrorActionPreference = 'Stop'; "
+                 "$acl = Get-Acl $env:F01_KEY; "
+                 "$who = [Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+                 "$rule = New-Object Security.AccessControl.RegistryAccessRule("
+                 "$who, [Security.AccessControl.RegistryRights]::Delete, "
+                 "[Security.AccessControl.InheritanceFlags]::None, "
+                 "[Security.AccessControl.PropagationFlags]::None, "
+                 "[Security.AccessControl.AccessControlType]::Deny); "
+                 "$acl.AddAccessRule($rule); Set-Acl $env:F01_KEY $acl"],
+                env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
+            try:
+                proc = _run_uninstall_cmd(root)
+                self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
+                self.assertIn("retry is possible", (proc.stdout or "").lower())
+                self.assertNotIn("automatic retry cannot", (proc.stdout or "").lower())
+                self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+                self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+            finally:
+                subprocess.run(
+                    [_powershell_exe(), "-NoProfile", "-Command",
+                     "$acl = Get-Acl $env:F01_KEY; "
+                     "$acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' } | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }; "
+                     "Set-Acl $env:F01_KEY $acl"],
+                    env=env, capture_output=True, text=True,
+                )
+            again = _run_uninstall_cmd(root)
+            self.assertEqual(again.returncode, safety.EXIT_OK, again.stdout + again.stderr)

@@ -742,7 +742,16 @@ def safe_uninstall(install_root, expected_app_name=DEFAULT_APP_NAME, anchor_key=
             "Manifest and uninstall scripts were kept.",
         )
 
-    for name in (UNINSTALL_PS1_FILENAME, UNINSTALL_CMD_FILENAME, MANIFEST_FILENAME):
+    if not retire_matching_anchor(anchor_key, root):
+        return _stop_uninstall(
+            result,
+            EXIT_FINAL,
+            "MANUAL CLEANUP REQUIRED: payload was removed but the install anchor remains. "
+            "Manifest and uninstall scripts were kept. Retry is possible. Exit code 4.",
+        )
+    result["anchor_kept"] = False
+
+    for name in (MANIFEST_FILENAME, UNINSTALL_PS1_FILENAME, UNINSTALL_CMD_FILENAME):
         path = os.path.join(root, name)
         if not os.path.lexists(path):
             continue
@@ -758,7 +767,8 @@ def safe_uninstall(install_root, expected_app_name=DEFAULT_APP_NAME, anchor_key=
         return _stop_uninstall(
             result,
             EXIT_FINAL,
-            "MANUAL CLEANUP REQUIRED: payload was removed but recovery files remain. Exit code 4.",
+            "MANUAL CLEANUP REQUIRED: the install anchor was removed but recovery files remain. "
+            "Automatic retry cannot verify ownership. Exit code 4.",
         )
 
     if manifest.get("created_root") is True and os.path.isdir(root) and not is_reparse_point(root):
@@ -779,13 +789,6 @@ def safe_uninstall(install_root, expected_app_name=DEFAULT_APP_NAME, anchor_key=
                 "MANUAL CLEANUP REQUIRED: payload was removed but the install folder remains. Exit code 4.",
             )
 
-    if not retire_matching_anchor(anchor_key, root):
-        return _stop_uninstall(
-            result,
-            EXIT_FINAL,
-            "MANUAL CLEANUP REQUIRED: payload was removed but the install anchor remains. Exit code 4.",
-        )
-    result["anchor_kept"] = False
     result["exit_code"] = EXIT_OK
     result["manual_cleanup"] = False
     result["message"] = "owned files removed"
@@ -1143,6 +1146,10 @@ foreach ($lnkPath in @($ShortcutPaths)) {
         $finalFailed = $true
     }
 }
+if ($finalFailed) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed for an owned shortcut. Manifest, anchor, and uninstall scripts were kept. Retry is possible. Exit code 4.'
+    exit 4
+}
 
 try {
     $run = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($RunKey, $true)
@@ -1174,15 +1181,29 @@ try {
 } catch {
     $finalFailed = $true
 }
-
-try {
-    if ((Test-Path -LiteralPath $ManifestPath -PathType Leaf) -and -not (Test-Reparse $ManifestPath)) {
-        [IO.File]::Delete($ManifestPath)
-    }
-} catch {
-    $finalFailed = $true
+if ($finalFailed) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed for the startup value. Manifest, anchor, and uninstall scripts were kept. Retry is possible. Exit code 4.'
+    exit 4
 }
-if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) { $finalFailed = $true }
+
+if ((Test-Path -LiteralPath $ManifestPath -PathType Leaf) -and -not (Test-Reparse $ManifestPath)) {
+    $manifestItem = Get-Item -LiteralPath $ManifestPath -Force
+    if ($manifestItem.Attributes -band [IO.FileAttributes]::ReadOnly) {
+        Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but the manifest is not deletable. Anchor and uninstall scripts were kept. Retry is possible. Exit code 4.'
+        exit 4
+    }
+}
+$retiring = $ManifestPath + '.retiring'
+$movedManifest = $false
+if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
+    try {
+        [IO.File]::Move($ManifestPath, $retiring)
+        $movedManifest = $true
+    } catch {
+        Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but the manifest could not be moved aside. Anchor and uninstall scripts were kept. Retry is possible. Exit code 4.'
+        exit 4
+    }
+}
 
 $anchorMatched = $false
 try {
@@ -1196,16 +1217,35 @@ try {
     }
     if ($anchorMatched) { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($AnchorKey, $false) }
 } catch {
-    $finalFailed = $true
+    if (-not $anchorMatched) {
+        if ($movedManifest -and (Test-Path -LiteralPath $retiring)) {
+            try { [IO.File]::Move($retiring, $ManifestPath) } catch {}
+        }
+        Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but the anchor could not be read. Manifest and uninstall scripts were kept. Retry is possible. Exit code 4.'
+        exit 4
+    }
 }
 if ($anchorMatched) {
     $stillAnchor = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($AnchorKey)
-    if ($stillAnchor) { $stillAnchor.Close(); $finalFailed = $true }
+    if ($stillAnchor) {
+        $stillAnchor.Close()
+        if ($movedManifest -and (Test-Path -LiteralPath $retiring)) {
+            try { [IO.File]::Move($retiring, $ManifestPath) } catch {}
+        }
+        if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
+            Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but the anchor remains. Manifest and uninstall scripts were kept. Retry is possible. Exit code 4.'
+        } else {
+            Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed, the anchor remains, and the manifest could not be restored. Automatic retry cannot verify ownership. Exit code 4.'
+        }
+        exit 4
+    }
 }
 
-if ($finalFailed) {
-    Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed. Recovery scripts were kept. Exit code 4.'
-    exit 4
+if ($movedManifest -and (Test-Path -LiteralPath $retiring)) {
+    try { [IO.File]::Delete($retiring) } catch {
+        Write-Host 'MANUAL CLEANUP REQUIRED: the anchor was removed but the manifest file remains. Automatic retry cannot verify ownership. Delete the leftover manifest and scripts manually. Exit code 4.'
+        exit 4
+    }
 }
 
 Write-Host ($AppName + ' owned files were removed. Exit code 0.')
