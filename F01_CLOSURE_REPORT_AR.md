@@ -3,6 +3,9 @@
 ## تحديث F01R2
 
 HEAD عند بدء هذا التصحيح: `23d8a73b3591183d48ae4baaf7af274e31556d60`. الفرع `fix/f01-safe-uninstall`. `main` بقي `f17f942f0be63ea4564378a2997669a5b5cd4869`. لا دمج.
+التزام F01R2: `d77787dc48974aceca37eed44649a1a503ce9216`.
+المقارنة: https://github.com/elsayednegm13/Negm-Loading/compare/main...fix/f01-safe-uninstall
+التزام الشيفرة: https://github.com/elsayednegm13/Negm-Loading/commit/d77787dc48974aceca37eed44649a1a503ce9216
 
 ### المانع 1 — إنهاء عملية أجنبية
 
