@@ -4,13 +4,12 @@ NegmLoading Professional Windows Setup Wizard & Packaging Engine
 import os
 import sys
 import json
-import shutil
 import subprocess
-import zipfile
 import threading
 import tkinter as tk
 from tkinter import filedialog as fd
 import customtkinter as ctk
+import installer_safety
 
 APP_NAME = "Negm Lodaing"
 APP_VERSION = "1.0.0"
@@ -67,6 +66,17 @@ lnk.Save
     except Exception as e:
         print("Shortcut error:", e)
         return False
+
+def write_safe_uninstaller(install_dir, owned_files, owned_dirs, created_root=False):
+    return installer_safety.write_uninstall_artifacts(
+        install_dir,
+        owned_files,
+        owned_dirs,
+        app_name=APP_NAME,
+        app_version=APP_VERSION,
+        created_root=created_root,
+    )
+
 
 def register_uninstall(install_dir, uninstaller_exe):
     if sys.platform != "win32":
@@ -220,26 +230,41 @@ class SetupWizard(ctk.CTk):
 
     def _run_install_worker(self):
         dest = os.path.normpath(self.install_dir.get())
-        os.makedirs(dest, exist_ok=True)
+        owned_files = []
+        owned_dirs = []
 
         try:
-            self._set_prog(0.1, "استخراج ملفات البرنامج...")
+            dest = installer_safety.validate_install_root(dest)
             if os.path.exists(self.payload_zip_path):
-                with zipfile.ZipFile(self.payload_zip_path, "r") as z:
-                    infos = z.infolist()
-                    total = len(infos)
-                    for idx, info in enumerate(infos, start=1):
-                        z.extract(info, dest)
-                        self._set_prog(0.1 + (idx / total) * 0.6, f"استخراج: {info.filename}")
+                planned, _zip_dirs = installer_safety.list_zip_payload_paths(self.payload_zip_path)
             else:
-                # Standalone fallback: copy files from current source
+                planned = []
                 src_exe = os.path.join("dist", f"{APP_NAME}.exe")
                 if os.path.exists(src_exe):
-                    shutil.copy2(src_exe, os.path.join(dest, f"{APP_NAME}.exe"))
+                    planned.append(f"{APP_NAME}.exe")
                 if os.path.exists("browser_extension"):
-                    shutil.copytree("browser_extension", os.path.join(dest, "browser_extension"), dirs_exist_ok=True)
+                    planned.extend(installer_safety.list_tree_file_relpaths("browser_extension", "browser_extension"))
                 if os.path.exists("assets"):
-                    shutil.copytree("assets", os.path.join(dest, "assets"), dirs_exist_ok=True)
+                    planned.extend(installer_safety.list_tree_file_relpaths("assets", "assets"))
+            dest, created_root, _old_manifest = installer_safety.assess_destination(dest, planned)
+            os.makedirs(dest, exist_ok=True)
+
+            self._set_prog(0.1, "استخراج ملفات البرنامج...")
+            if os.path.exists(self.payload_zip_path):
+                owned_files, owned_dirs = installer_safety.safe_extract_zip(self.payload_zip_path, dest)
+                self._set_prog(0.7, "اكتمل استخراج الحزمة")
+            else:
+                src_exe = os.path.join("dist", f"{APP_NAME}.exe")
+                if os.path.exists(src_exe):
+                    owned_files.append(installer_safety.safe_copy_file(src_exe, dest, f"{APP_NAME}.exe"))
+                if os.path.exists("browser_extension"):
+                    files, dirs = installer_safety.safe_copy_tree("browser_extension", dest, "browser_extension")
+                    owned_files.extend(files)
+                    owned_dirs.extend(dirs)
+                if os.path.exists("assets"):
+                    files, dirs = installer_safety.safe_copy_tree("assets", dest, "assets")
+                    owned_files.extend(files)
+                    owned_dirs.extend(dirs)
 
             self._set_prog(0.75, "إنشاء اختصارات سطح المكتب وقائمة ابدأ...")
             target_exe = os.path.join(dest, f"{APP_NAME}.exe")
@@ -256,22 +281,7 @@ class SetupWizard(ctk.CTk):
                 create_windows_shortcut(target_exe, os.path.join(programs_menu, f"{APP_NAME}.lnk"), f"{APP_NAME} Download Manager", icon_ico)
 
             self._set_prog(0.88, "تسجيل برنامج إزالة التثبيت وإعدادات Windows...")
-            # Create Uninstaller Script/Executable
-            uninstaller_path = os.path.join(dest, "uninstall.cmd")
-            with open(uninstaller_path, "w", encoding="utf-8") as un_f:
-                un_f.write(f'''@echo off
-title Removing {APP_NAME}...
-taskkill /f /im {APP_NAME}.exe >nul 2>&1
-timeout /t 1 /nobreak >nul
-del /f /q "%USERPROFILE%\\Desktop\\{APP_NAME}.lnk" >nul 2>&1
-del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{APP_NAME}.lnk" >nul 2>&1
-reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{APP_NAME}" /f >nul 2>&1
-reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{APP_NAME}" /f >nul 2>&1
-cd "%TEMP%"
-rd /s /q "{dest}" >nul 2>&1
-echo {APP_NAME} has been completely uninstalled.
-timeout /t 3
-''')
+            uninstaller_path = write_safe_uninstaller(dest, owned_files, owned_dirs, created_root=created_root)
             register_uninstall(dest, uninstaller_path)
 
             if self.chk_startup.get() and sys.platform == "win32":
