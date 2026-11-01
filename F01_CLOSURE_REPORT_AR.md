@@ -9,8 +9,11 @@
 - أساس المرحلة: `2f532aa653b71b92437434a3dc37528af9ba3c92` (Use safe uninstall artifacts)
 - HEAD عند بدء F-01R: `2f532aa653b71b92437434a3dc37528af9ba3c92`
 - التزام الشيفرة والأدلة: `9de8845534eb1fc46cde00ffdbc37421ba7f3458`
-- هذا التقرير يُضاف في الالتزام التالي مباشرة على الفرع نفسه.
-- لا يوجد PR، ولم يُنفَّذ merge إلى `main`. الدفع إلى `origin/fix/f01-safe-uninstall` يُحاول بعد التزام التقرير فقط.
+- التزام التقرير الأول: `3c53ec280152b77cd64d64daed17faeb3bdc8a91`
+- لا يوجد PR، ولم يُنفَّذ merge إلى `main`.
+- دُفع `2f532aa..3c53ec2` إلى `origin/fix/f01-safe-uninstall`، ثم أُضيف سطر التوثيق هذا بعده.
+- المقارنة: https://github.com/elsayednegm13/Negm-Loading/compare/main...fix/f01-safe-uninstall
+- التزام الشيفرة: https://github.com/elsayednegm13/Negm-Loading/commit/9de8845534eb1fc46cde00ffdbc37421ba7f3458
 - `main` لم يُعدَّل. `stash@{0}` الخاص بـ GitHub Desktop تُرك كما هو ولم يُطبَّق.
 
 ## 2. المعالجات
