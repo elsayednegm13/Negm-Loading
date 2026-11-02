@@ -41,8 +41,13 @@ def get_default_install_dir():
     return os.path.join(prog_files, DEFAULT_INSTALL_SUBDIR)
 
 def create_windows_shortcut(target_exe, shortcut_path, description="NegmLoading", icon_path=""):
+    """Create a shortcut only when the path is absent. Never overwrite an existing file."""
     try:
+        if os.path.lexists(shortcut_path):
+            return "preserved"
         os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
+        if os.path.lexists(shortcut_path):
+            return "preserved"
         work_dir = os.path.dirname(target_exe)
         icon_arg = icon_path or target_exe
         vbs_content = f'''
@@ -62,12 +67,14 @@ lnk.Save
             os.remove(vbs_file)
         except Exception:
             pass
-        return os.path.exists(shortcut_path)
+        if os.path.isfile(shortcut_path):
+            return "created"
+        return "failed"
     except Exception as e:
         print("Shortcut error:", e)
-        return False
+        return "failed"
 
-def write_safe_uninstaller(install_dir, owned_files, owned_dirs, created_root=False):
+def write_safe_uninstaller(install_dir, owned_files, owned_dirs, created_root=False, shortcut_paths=None):
     return installer_safety.write_uninstall_artifacts(
         install_dir,
         owned_files,
@@ -75,14 +82,18 @@ def write_safe_uninstaller(install_dir, owned_files, owned_dirs, created_root=Fa
         app_name=APP_NAME,
         app_version=APP_VERSION,
         created_root=created_root,
+        shortcut_paths=shortcut_paths,
     )
 
 
 def register_uninstall(install_dir, uninstaller_exe):
     if sys.platform != "win32":
         return
+    import winreg
+    installer_safety.assert_uninstall_key_available(
+        installer_safety.DEFAULT_UNINSTALL_KEY, install_dir
+    )
     try:
-        import winreg
         key_path = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_NAME}"
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
             winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
@@ -95,8 +106,10 @@ def register_uninstall(install_dir, uninstaller_exe):
             winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstaller_exe}"')
             winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
             winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
+    except installer_safety.InstallSafetyError:
+        raise
     except Exception as e:
-        print("Registry error:", e)
+        raise installer_safety.InstallSafetyError("تعذر تسجيل الإزالة: %s" % e)
 
 class SetupWizard(ctk.CTk):
     def __init__(self, payload_zip_path=None):
@@ -247,6 +260,15 @@ class SetupWizard(ctk.CTk):
                 if os.path.exists("assets"):
                     planned.extend(installer_safety.list_tree_file_relpaths("assets", "assets"))
             dest, created_root, _old_manifest = installer_safety.assess_destination(dest, planned)
+            target_exe = os.path.join(dest, f"{APP_NAME}.exe")
+            if sys.platform == "win32":
+                installer_safety.assert_uninstall_key_available(
+                    installer_safety.DEFAULT_UNINSTALL_KEY, dest
+                )
+                if self.chk_startup.get():
+                    installer_safety.assert_run_value_available(
+                        installer_safety.DEFAULT_RUN_KEY, APP_NAME, target_exe
+                    )
             os.makedirs(dest, exist_ok=True)
 
             self._set_prog(0.1, "استخراج ملفات البرنامج...")
@@ -272,25 +294,43 @@ class SetupWizard(ctk.CTk):
             if not os.path.exists(icon_ico):
                 icon_ico = target_exe
 
+            created_shortcuts = []
+            self.integration_notes = []
+            shortcut_jobs = []
             if self.chk_desktop.get():
-                desktop = os.path.expanduser(r"~\Desktop")
-                create_windows_shortcut(target_exe, os.path.join(desktop, f"{APP_NAME}.lnk"), f"{APP_NAME} Download Manager", icon_ico)
-
+                shortcut_jobs.append(os.path.join(os.path.expanduser(r"~\Desktop"), f"{APP_NAME}.lnk"))
             if self.chk_startmenu.get():
                 programs_menu = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
-                create_windows_shortcut(target_exe, os.path.join(programs_menu, f"{APP_NAME}.lnk"), f"{APP_NAME} Download Manager", icon_ico)
+                shortcut_jobs.append(os.path.join(programs_menu, f"{APP_NAME}.lnk"))
+            for shortcut_path in shortcut_jobs:
+                outcome = create_windows_shortcut(
+                    target_exe, shortcut_path, f"{APP_NAME} Download Manager", icon_ico
+                )
+                if outcome == "created":
+                    created_shortcuts.append(os.path.abspath(shortcut_path))
+                elif outcome == "preserved":
+                    self.integration_notes.append(
+                        "تُرك اختصار موجود دون تعديل: %s" % shortcut_path
+                    )
+                else:
+                    raise installer_safety.InstallSafetyError(
+                        "تعذر إنشاء الاختصار، ولم يتم استبدال ملف موجود."
+                    )
 
             self._set_prog(0.88, "تسجيل برنامج إزالة التثبيت وإعدادات Windows...")
-            uninstaller_path = write_safe_uninstaller(dest, owned_files, owned_dirs, created_root=created_root)
+            uninstaller_path = write_safe_uninstaller(
+                dest, owned_files, owned_dirs, created_root=created_root,
+                shortcut_paths=created_shortcuts,
+            )
             register_uninstall(dest, uninstaller_path)
 
             if self.chk_startup.get() and sys.platform == "win32":
-                try:
-                    import winreg
-                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as key:
-                        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{target_exe}" --tray')
-                except Exception:
-                    pass
+                installer_safety.assert_run_value_available(
+                    installer_safety.DEFAULT_RUN_KEY, APP_NAME, target_exe
+                )
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as key:
+                    winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{target_exe}" --tray')
 
             self._set_prog(1.0, "اكتمل التثبيت بنجاح!")
             self.after(500, self.show_step_4)
@@ -323,6 +363,9 @@ class SetupWizard(ctk.CTk):
             "• تم تفعيل كافة ميزات التنزيل متعدد الأجزاء.\n"
             "• إضافة المتصفح جاهزة في مجلد البرنامج للتفعيل المباشر.\n"
         )
+        notes = getattr(self, "integration_notes", None) or []
+        if notes:
+            msg += "\n" + "\n".join(notes) + "\n"
         ctk.CTkLabel(c_in, text=msg, font=("Segoe UI", 12), text_color=col("text_muted"), justify="right", anchor="e").pack(fill="x", pady=(0, 16))
         ctk.CTkCheckBox(c_in, text=f"تشغيل {APP_NAME} الآن", variable=self.chk_launch, font=("Segoe UI", 13, "bold")).pack(fill="x", pady=6)
 

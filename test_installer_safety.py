@@ -406,7 +406,9 @@ class TestGeneratedUninstaller(unittest.TestCase):
         self.assertNotIn("taskkill", cmd.lower())
         self.assertNotIn("%USERPROFILE%", cmd)
         self.assertNotIn("reg delete", cmd.lower())
-        self.assertLess(cmd.find('if "%EC%"=="0"'), cmd.find("del /f /q"))
+        self.assertNotIn("del /f /q", cmd.lower())
+        self.assertNotIn("EnableDelayedExpansion", cmd)
+        self.assertIn('if "%EC%"=="0" goto Announce', cmd)
         self.assertIn(safety.DEFAULT_UNINSTALL_KEY, ps1)
         self.assertIn("InstallAnchor", ps1)
         self.assertIn("Exit code 2", ps1)
@@ -506,7 +508,9 @@ def _powershell_exe():
 
 def _run_uninstall_cmd(root):
     cmd = os.path.join(root, safety.UNINSTALL_CMD_FILENAME)
-    return subprocess.run(["cmd.exe", "/c", cmd], cwd=root, capture_output=True, text=True)
+    # cmd.exe /s preserves quotes when the path contains & or parentheses.
+    command = 'cmd.exe /s /c ""%s""' % cmd
+    return subprocess.run(command, cwd=root, capture_output=True, text=True)
 
 
 def _make_shortcut(path, target):
@@ -897,3 +901,102 @@ class TestWindowsUninstallChain(unittest.TestCase):
                 )
             again = _run_uninstall_cmd(root)
             self.assertEqual(again.returncode, safety.EXIT_OK, again.stdout + again.stderr)
+
+
+class TestIntegrationOwnership(unittest.TestCase):
+    def test_existing_shortcut_is_not_overwritten(self):
+        if os.name != "nt":
+            self.skipTest("Windows shortcut creation")
+        import installer_engine
+        with tempfile.TemporaryDirectory() as tmp:
+            foreign = os.path.join(tmp, "links", "App.lnk")
+            ours = os.path.join(tmp, "app", "Negm Lodaing.exe")
+            _write(ours, b"exe")
+            _make_shortcut(foreign, r"C:\Foreign\tool.exe")
+            before = _sha(foreign)
+            outcome = installer_engine.create_windows_shortcut(ours, foreign, "desc", ours)
+            self.assertEqual(outcome, "preserved")
+            self.assertEqual(_sha(foreign), before)
+            same_target = os.path.join(tmp, "links", "Same.lnk")
+            _make_shortcut(same_target, ours)
+            same_before = _sha(same_target)
+            outcome = installer_engine.create_windows_shortcut(ours, same_target, "desc", ours)
+            self.assertEqual(outcome, "preserved")
+            self.assertEqual(_sha(same_target), same_before)
+            fresh = os.path.join(tmp, "links", "Fresh.lnk")
+            outcome = installer_engine.create_windows_shortcut(ours, fresh, "desc", ours)
+            self.assertEqual(outcome, "created")
+            self.assertTrue(os.path.isfile(fresh))
+
+    def test_other_install_key_and_foreign_run_value_stay(self):
+        if os.name != "nt":
+            self.skipTest("Windows registry")
+        import winreg
+        key = safety.make_test_anchor_key()
+        run_key = key + "\\Run"
+        _OPEN_KEYS.append(key)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as reg:
+            winreg.SetValueEx(reg, "InstallLocation", 0, winreg.REG_SZ, r"D:\Other Install")
+            winreg.SetValueEx(reg, "Marker", 0, winreg.REG_SZ, "keep-me")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, run_key) as reg:
+            winreg.SetValueEx(reg, safety.DEFAULT_APP_NAME, 0, winreg.REG_SZ, r'"D:\Other\app.exe" --tray')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "this install")
+            os.makedirs(root)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.write_install_anchor(root, key)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.assert_run_value_available(
+                    run_key, safety.DEFAULT_APP_NAME, os.path.join(root, "Negm Lodaing.exe")
+                )
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as reg:
+            self.assertEqual(winreg.QueryValueEx(reg, "InstallLocation")[0], r"D:\Other Install")
+            self.assertEqual(winreg.QueryValueEx(reg, "Marker")[0], "keep-me")
+            self.assertFalse(_value_exists(reg, safety.ANCHOR_VALUE_NAME))
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key) as reg:
+            self.assertEqual(
+                winreg.QueryValueEx(reg, safety.DEFAULT_APP_NAME)[0],
+                r'"D:\Other\app.exe" --tray',
+            )
+
+    def test_uninstall_does_not_delete_unrecorded_shortcut(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            _install_owned(root, {"owned.exe": b"payload"})
+            link = os.path.join(tmp, "links", "foreign.lnk")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            before = _sha(link)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertEqual(_sha(link), before)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+
+    def test_cmd_special_characters_in_install_path(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        cases = ["Negm ! Install", "Negm & (Install)"]
+        for folder in cases:
+            with self.subTest(folder=folder):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = os.path.join(tmp, folder)
+                    os.makedirs(root)
+                    user = os.path.join(tmp, "user " + folder + ".txt")
+                    _write(user, "keep-" + folder)
+                    before = _sha(user)
+                    _install_owned(root, {"owned.exe": b"payload"})
+                    proc = _run_uninstall_cmd(root)
+                    self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+                    self.assertEqual(_sha(user), before)
+                    self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+
+
+def _value_exists(key, name):
+    import winreg
+    try:
+        winreg.QueryValueEx(key, name)
+    except FileNotFoundError:
+        return False
+    return True

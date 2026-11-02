@@ -378,6 +378,19 @@ def _validate_manifest_entry(entry, field):
     return {"path": path}
 
 
+def validate_shortcut_path(path):
+    if not isinstance(path, str) or not path.strip():
+        raise InstallSafetyError("shortcut path is empty")
+    if any(char in path for char in ("\x00", "\r", "\n")):
+        raise InstallSafetyError("shortcut path is unsafe")
+    absolute = os.path.abspath(path)
+    if _is_unc_path(absolute) or not os.path.splitdrive(absolute)[0]:
+        raise InstallSafetyError("shortcut path must be a local absolute path")
+    if not absolute.lower().endswith(".lnk"):
+        raise InstallSafetyError("shortcut path must be a .lnk file")
+    return absolute
+
+
 def load_manifest(install_root, expected_app_name=None):
     root = validate_install_root(install_root)
     manifest_path = os.path.join(root, MANIFEST_FILENAME)
@@ -405,6 +418,10 @@ def load_manifest(install_root, expected_app_name=None):
 
     safe_files = [_validate_manifest_entry(item, "files") for item in files]
     safe_dirs = [_validate_manifest_entry(item, "directories") for item in directories]
+    shortcuts = data.get("shortcuts", [])
+    if not isinstance(shortcuts, list):
+        raise InstallSafetyError("install manifest shortcuts are invalid")
+    safe_shortcuts = [validate_shortcut_path(item) for item in shortcuts]
     created_root = data.get("created_root") is True
     return {
         "version": MANIFEST_VERSION,
@@ -414,11 +431,12 @@ def load_manifest(install_root, expected_app_name=None):
         "created_root": created_root,
         "files": safe_files,
         "directories": safe_dirs,
+        "shortcuts": safe_shortcuts,
     }
 
 
 def write_manifest(install_root, files, directories, app_name=DEFAULT_APP_NAME,
-                   app_version="1.0.0", created_root=False):
+                   app_version="1.0.0", created_root=False, shortcuts=None):
     root = validate_install_root(install_root)
     payload = {
         "version": MANIFEST_VERSION,
@@ -431,6 +449,7 @@ def write_manifest(install_root, files, directories, app_name=DEFAULT_APP_NAME,
                   for item in files],
         "directories": [{"path": validate_relative_path(item["path"] if isinstance(item, dict) else item)}
                         for item in directories],
+        "shortcuts": [validate_shortcut_path(item) for item in (shortcuts or [])],
     }
     dest = os.path.join(root, MANIFEST_FILENAME)
     tmp = dest + ".tmp"
@@ -474,6 +493,8 @@ def manifest_fingerprint(manifest):
         lines.append("F\t%s\t%s\t%d" % (entry["path"], entry["sha256"].lower(), int(entry["size"])))
     for entry in sorted(manifest.get("directories", []), key=lambda item: item["path"]):
         lines.append("D\t%s" % entry["path"])
+    for path in sorted(manifest.get("shortcuts") or []):
+        lines.append("S\t%s" % path)
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
@@ -484,6 +505,68 @@ def make_test_anchor_key():
 def _require_windows_registry():
     if os.name != "nt":
         raise InstallSafetyError("Windows registry anchor is unavailable")
+
+
+def _locations_match(left, right):
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def _exe_from_command(value):
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        if end > 1:
+            return text[1:end]
+    return text.split(" ", 1)[0]
+
+
+def assert_uninstall_key_available(anchor_key, install_root):
+    """Refuse to replace an uninstall key that belongs to another location."""
+    _require_windows_registry()
+    import winreg
+    root = validate_install_root(install_root)
+    if not _safe_registry_key(anchor_key):
+        raise InstallSafetyError("unsafe registry key")
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, anchor_key)
+    except FileNotFoundError:
+        return
+    with key:
+        try:
+            location, _kind = winreg.QueryValueEx(key, "InstallLocation")
+        except FileNotFoundError as exc:
+            raise InstallSafetyError(
+                "مفتاح الإزالة موجود بلا InstallLocation. لن يتم استبداله."
+            ) from exc
+    if not isinstance(location, str) or not location.strip():
+        raise InstallSafetyError("مفتاح الإزالة موجود بلا مسار صالح. لن يتم استبداله.")
+    if not _locations_match(location, root):
+        raise InstallSafetyError("مفتاح الإزالة يشير إلى تثبيت آخر. لن يتم استبداله.")
+
+
+def assert_run_value_available(run_key, value_name, expected_exe):
+    """Refuse to replace a startup value that points somewhere else."""
+    _require_windows_registry()
+    import winreg
+    if not _safe_registry_key(run_key):
+        raise InstallSafetyError("unsafe registry key")
+    if not isinstance(value_name, str) or not value_name or any(char in value_name for char in "\x00\\"):
+        raise InstallSafetyError("unsafe startup value name")
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key)
+    except FileNotFoundError:
+        return
+    with key:
+        try:
+            current, _kind = winreg.QueryValueEx(key, value_name)
+        except FileNotFoundError:
+            return
+    exe = _exe_from_command(current if isinstance(current, str) else "")
+    if exe and _locations_match(exe, expected_exe):
+        return
+    raise InstallSafetyError("قيمة بدء التشغيل تخص برنامجًا آخر. لن يتم استبدالها.")
 
 
 def write_install_anchor(install_root, anchor_key, manifest=None):
@@ -500,6 +583,7 @@ def write_install_anchor(install_root, anchor_key, manifest=None):
     root = validate_install_root(install_root)
     if not _safe_registry_key(anchor_key):
         raise InstallSafetyError("unsafe registry key")
+    assert_uninstall_key_available(anchor_key, root)
     manifest = manifest or load_manifest(root)
     payload = {
         "app_name": manifest["app_name"],
@@ -825,39 +909,25 @@ def _powershell_uninstaller(app_name, anchor_key=None, run_key=None, shortcut_pa
 
 
 _CMD_TEMPLATE = """@echo off\r
-setlocal EnableExtensions EnableDelayedExpansion\r
+setlocal EnableExtensions\r
 title Removing __APP_NAME__...\r
-rem Exit 0: payload removed, final cleanup verified, recovery files retired.\r
+rem Exit 0: payload removed and final cleanup verified by PowerShell.\r
 rem Exit 2: verification failed. No files, shortcuts, or registry values were removed.\r
 rem Exit 3: payload removal incomplete. Manifest, scripts, shortcuts, and the anchor were kept.\r
 rem Exit 4: payload was removed but final cleanup could not be verified.\r
-if not exist \"%~dp0__PS1__\" (\r
-  echo MANUAL CLEANUP REQUIRED: missing uninstall helper. Exit code 2.\r
-  exit /b 2\r
-)\r
+if not exist \"%~dp0__PS1__\" goto MissingHelper\r
 \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0__PS1__\"\r
 set \"EC=%ERRORLEVEL%\"\r
-if \"%EC%\"==\"0\" goto Finalize\r
+if \"%EC%\"==\"0\" goto Announce\r
 if \"%EC%\"==\"4\" goto FinalReported\r
 echo MANUAL CLEANUP REQUIRED: uninstall stopped before completion. Manifest and uninstall scripts were kept. Exit code %EC%.\r
 exit /b %EC%\r
-:Finalize\r
-for %%I in (\"%~dp0.\") do set \"INSTALL_ROOT=%%~fI\"\r
-cd /d \"%TEMP%\"\r
-if exist \"!INSTALL_ROOT!\\__PS1__\" del /f /q \"!INSTALL_ROOT!\\__PS1__\"\r
-if exist \"!INSTALL_ROOT!\\__PS1__\" goto HelperRemains\r
-if \"__CREATED_ROOT__\"==\"1\" (\r
-  dir /b /a \"!INSTALL_ROOT!\" | findstr /i /v /x \"uninstall.cmd\" >nul\r
-  if not errorlevel 1 goto FolderRemains\r
-)\r
+:MissingHelper\r
+echo MANUAL CLEANUP REQUIRED: missing uninstall helper. Exit code 2.\r
+exit /b 2\r
+:Announce\r
 echo __APP_NAME__ owned files were removed.\r
 exit /b 0\r
-:HelperRemains\r
-echo MANUAL CLEANUP REQUIRED: payload was removed but the uninstall helper remains. Exit code 4.\r
-exit /b 4\r
-:FolderRemains\r
-echo MANUAL CLEANUP REQUIRED: payload was removed but the install folder still holds files. Exit code 4.\r
-exit /b 4\r
 :FinalReported\r
 echo MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed. Recovery scripts were kept. Exit code 4.\r
 exit /b 4\r
@@ -907,6 +977,7 @@ def write_uninstall_artifacts(install_root, owned_files, owned_dirs, app_name=DE
         app_name=app,
         app_version=app_version,
         created_root=created_root,
+        shortcuts=shortcut_paths or [],
     )
     write_install_anchor(root, anchor_key, load_manifest(root))
     return cmd_path
@@ -1011,6 +1082,22 @@ function Get-ManifestFingerprint($manifest) {
     }
     foreach ($d in $dirs) {
         [void]$lines.Add('D' + "`t" + [string]$d.path)
+    }
+    $shortcuts = @()
+    if ($null -ne $manifest.shortcuts) { $shortcuts = @($manifest.shortcuts) }
+    if ($shortcuts.Count -gt 1) {
+        for ($i = 0; $i -lt $shortcuts.Count; $i++) {
+            for ($j = $i + 1; $j -lt $shortcuts.Count; $j++) {
+                if ([StringComparer]::Ordinal.Compare([string]$shortcuts[$j], [string]$shortcuts[$i]) -lt 0) {
+                    $swap = $shortcuts[$i]; $shortcuts[$i] = $shortcuts[$j]; $shortcuts[$j] = $swap
+                }
+            }
+        }
+    }
+    foreach ($shortcut in $shortcuts) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$shortcut)) {
+            [void]$lines.Add('S' + "`t" + [string]$shortcut)
+        }
     }
     $text = [string]::Join("`n", $lines.ToArray())
     $sha = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($text))
@@ -1128,7 +1215,9 @@ if ($preserved -or $left.Count -gt 0) {
 
 $shell = $null
 $finalFailed = $false
-foreach ($lnkPath in @($ShortcutPaths)) {
+$recordedShortcuts = @()
+if ($null -ne $manifest.shortcuts) { $recordedShortcuts = @($manifest.shortcuts) }
+foreach ($lnkPath in $recordedShortcuts) {
     if ([string]::IsNullOrWhiteSpace([string]$lnkPath)) { continue }
     if (-not (Test-Path -LiteralPath $lnkPath -PathType Leaf)) { continue }
     if (Test-Reparse $lnkPath) { $finalFailed = $true; continue }
@@ -1139,7 +1228,9 @@ foreach ($lnkPath in @($ShortcutPaths)) {
         if ($target -and (Test-WithinRoot $target)) {
             [IO.File]::Delete($lnkPath)
             if (Test-Path -LiteralPath $lnkPath) { $finalFailed = $true }
-        } elseif ([string]::IsNullOrWhiteSpace($target)) {
+        } elseif ($target) {
+            Write-Host ('MANUAL CLEANUP REQUIRED: recorded shortcut no longer points at this installation and was kept: ' + $lnkPath)
+        } else {
             $finalFailed = $true
         }
     } catch {
@@ -1165,7 +1256,17 @@ try {
             } else {
                 $exePath = ($exePath -split ' ', 2)[0]
             }
-            $targetsUs = Test-WithinRoot $exePath
+            $targetsUs = $false
+            if ($exePath -and (Test-WithinRoot $exePath)) {
+                $leaf = [IO.Path]::GetFileName($exePath)
+                $parent = [IO.Path]::GetDirectoryName($exePath)
+                $rootCmp = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+                if ($parent -and
+                    ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, ($AppName + '.exe')) -eq 0) -and
+                    ([StringComparer]::OrdinalIgnoreCase.Compare($parent.TrimEnd('\'), $rootCmp) -eq 0)) {
+                    $targetsUs = $true
+                }
+            }
             if ($targetsUs) { $run.DeleteValue($AppName, $false) }
         }
         $run.Close()
@@ -1246,6 +1347,22 @@ if ($movedManifest -and (Test-Path -LiteralPath $retiring)) {
         Write-Host 'MANUAL CLEANUP REQUIRED: the anchor was removed but the manifest file remains. Automatic retry cannot verify ownership. Delete the leftover manifest and scripts manually. Exit code 4.'
         exit 4
     }
+}
+
+if ($manifest.created_root -eq $true) {
+    $extra = @(Get-ChildItem -LiteralPath $Root -Force | Where-Object {
+        $_.Name -ne $HelperName -and $_.Name -ne $CmdName
+    })
+    if ($extra.Count -gt 0) {
+        Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but the install folder still holds files. Exit code 4.'
+        exit 4
+    }
+}
+$helperPath = Join-Path $Root $HelperName
+try { if (Test-Path -LiteralPath $helperPath) { [IO.File]::Delete($helperPath) } } catch {}
+if (Test-Path -LiteralPath $helperPath) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but the uninstall helper remains. Exit code 4.'
+    exit 4
 }
 
 Write-Host ($AppName + ' owned files were removed. Exit code 0.')

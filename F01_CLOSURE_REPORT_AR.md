@@ -1,6 +1,67 @@
 # F01_CLOSURE_REPORT_AR
 
+## تحديث F01R4
+
+HEAD قبل التصحيح: `15a4ce0336fe73837d590d2fcdecd8bb1d8775c7`. إصلاح F01R3: `b8758cd67f015179dd22cc771ee48b4819f0cfdb`. الفرع `fix/f01-safe-uninstall`. `main` ما زال `f17f942f0be63ea4564378a2997669a5b5cd4869`. لا دمج ولا نشر.
+
+### العطلان والسياسة
+
+| العطل | السبب | السياسة | الشيفرة | الدليل | ما يبقى يدويًا |
+|---|---|---|---|---|---|
+| اختصار موجود يُستبدل أو يُحذف لأن هدفه داخل الجذر | `create_windows_shortcut` كان يستدعي `.Save()` دائمًا، والمزيل كان يحذف كل `.lnk` هدفه داخل الجذر | لا كتابة فوق ملف موجود. الإنشاء فقط إذا كان المسار غائبًا، ثم يُسجَّل في البيان المربوط بالمرساة. الحذف فقط إذا كان المسار في ذلك البيان والهدف ما زال داخل الجذر. عند الشك يُحفظ الاختصار | `create_windows_shortcut` في `installer_engine.py`؛ حلقة `recordedShortcuts` في `installer_safety.py` | `test_existing_shortcut_is_not_overwritten` و`test_uninstall_does_not_delete_unrecorded_shortcut` في `f01-evidence/unittest-f01r4.txt` | اختصار سابق، حتى لو كان يشير إلى نفس التنفيذي، لا يُستبدل ولا يُحذف |
+| مفتاح Uninstall أو Run لتثبيت آخر يُستبدل | `register_uninstall` و`write_install_anchor` وكتابة Run كانت بلا فحص ملكية | fail-closed قبل نسخ الملفات إذا كان المفتاح يشير إلى جذر آخر أو بلا `InstallLocation`. قيمة Run الأجنبية لا تُستبدل. لا حذف لإصلاح التعارض | `assert_uninstall_key_available` و`assert_run_value_available` | `test_other_install_key_and_foreign_run_value_stay` على `HKCU\Software\NegmLoadingF01Test\<guid>` فقط | المفتاح والقيمة الأجنبيان يبقيان كما هما |
+
+إذا فشل إنشاء اختصار جديد، التثبيت لا يُعلن نجاحًا كاملًا. إذا وُجد اختصار سابق، يُتجاهل إنشاء الاختصار الاختياري وتظهر ملاحظة في رسالة نهاية التثبيت.
+
+### أحرف المسار
+
+`EnableDelayedExpansion` أُزيل من `_CMD_TEMPLATE` لأن `!` كان يُفسَّر داخل المسار. التنظيف النهائي للمسار صار داخل PowerShell عبر `-LiteralPath`. تشغيل الاختبار يستخدم `cmd.exe /s /c` لأن `&` و`()` تكسر اقتباس `cmd /c` العادي.
+
+| الحالة | النتيجة |
+|---|---|
+| `Negm ! Install` ومسافات، وملف مستخدم خارج الجذر | خروج 0، البصمة لم تتغير، الملف المملوك زال |
+| `Negm & (Install)` وملف مستخدم خارج الجذر | خروج 0، البصمة لم تتغير، الملف المملوك زال |
+
+الاختبار: `test_cmd_special_characters_in_install_path`.
+
+### الخروج 4 والاسترداد
+
+سلوك F01R3 بقي: فشل اختصار أو Run أو مرساة قبل حذف البيان يبقي البيان والمرساة والسكربتات، وإعادة المحاولة ممكنة. إذا زالت المرساة ثم فشل حذف ملف البيان، الإعادة الآلية لا تثبت الملكية ويُطلب تنظيف يدوي. لا حذف تكراري للجذر.
+
+### الاختبارات
+
+- `python -m unittest -v test_installer_safety`: 41 اختبارًا، OK، SKIP واحد، خروج العملية **0**، 18.456 ثانية في آخر تشغيل ناجح. السجل `f01-evidence/unittest-f01r4.txt` و`unittest-f01r4.meta.txt`.
+- `python -m compileall -q installer_engine.py installer_safety.py test_installer_safety.py`: خروج **0**.
+- `python run_all_tests.py`: النص `[SUCCESS]`، 85 اختبارًا، SKIP واحد، 55.539 ثانية. العملية لم تعد. رمز الغلاف بعد الإيقاف **-1**. ليس خروجًا طبيعيًا 0. `f01-evidence/run-all-tests-f01r4.txt`.
+- `git diff --check`: خروج **0** قبل الالتزام.
+- symlink: SKIP. لم تُفعَّل صلاحيات جديدة.
+- Sandbox/VM ونسخة PyInstaller لهذه الجولة: **NOT TESTED**. لم يُبنَ مثبت جديد هنا ولم يُشغَّل.
+
+### حد المرساة والتوافق
+
+مرساة HKCU ترفض تعديل البيان وحده. لا تحمي من عملية بنفس المستخدم تعيد كتابة البيان والمرساة معًا. لا HMAC بمفتاح محلي. التثبيتات القديمة بلا بيان، أو بيان بلا مرساة، تخرج 2 ولا تحذف. `uninstall.cmd` القديم الذي فيه `rd /s /q` يبقى على الأجهزة حتى إعادة التثبيت. اختصارات التثبيتات السابقة لهذه الجولة لم تُسجَّل في البيان، لذلك المزيل الجديد لا يحذفها ويلزم تنظيف يدوي. اختلاف `NegmLoading.exe` و`Negm Lodaing.exe` مؤجل إلى F-02 ولم يُبدأ.
+
+### للمراجع
+
+من ناحية الشيفرة، اختبارات الملكية والمسارات والخروج 4 القابل للإعادة نجحت في `unittest`. إغلاق F-01 ما زال مشروطًا بقرار المراجع. بوابة الإطلاق المنفصلة، ولم تُجتز هنا: Sandbox/VM، وsymlink، وخروج `run_all_tests.py` الطبيعي، والنسخ القديمة على الأجهزة.
+
+### القرار
+
+**CONDITIONAL GO لمراجعة الشيفرة، وNO-GO لإغلاق F-01 كإصدار.** سلامة الاختصارات والسجل داخل النطاق مختبرة. بوابات البيئة والإصدار لم تُدعَ أنها نجحت.
+
+### الملفات
+
+- `installer_engine.py`: عدم الكتابة فوق اختصار، وفحص HKCU قبل النسخ، وتمرير الاختصارات المنشأة فقط.
+- `installer_safety.py`: رفض مفتاح أو Run أجنبي، وتسجيل الاختصارات في البيان، وحذف المسجّل فقط، وإزالة التوسعة المؤجلة من cmd.
+- `test_installer_safety.py`: اختبارات التصادم والمسار.
+- `f01-evidence/*f01r4*` وهذا التقرير.
+
+التراجع: `git revert` لالتزام F01R4، أو `git checkout 15a4ce0336fe73837d590d2fcdecd8bb1d8775c7 -- installer_engine.py installer_safety.py test_installer_safety.py`. لا `reset --hard`.
+
+---
+
 ## تحديث F01R3
+
 
 HEAD قبل التصحيح: `abc975f4bc7d6d4382a40d15e59e7cdce3a17497`. الشيفرة المراجعة سابقًا: `d77787dc48974aceca37eed44649a1a503ce9216`. التزام F01R3: `b8758cd67f015179dd22cc771ee48b4819f0cfdb`. الفرع `fix/f01-safe-uninstall`. `main` ما زال `f17f942f0be63ea4564378a2997669a5b5cd4869`. لا دمج ولا نشر.
 المقارنة: https://github.com/elsayednegm13/Negm-Loading/compare/main...fix/f01-safe-uninstall
