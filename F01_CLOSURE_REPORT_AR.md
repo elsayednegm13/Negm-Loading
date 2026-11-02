@@ -2,7 +2,10 @@
 
 ## تحديث F01R4
 
-HEAD قبل التصحيح: `15a4ce0336fe73837d590d2fcdecd8bb1d8775c7`. إصلاح F01R3: `b8758cd67f015179dd22cc771ee48b4819f0cfdb`. الفرع `fix/f01-safe-uninstall`. `main` ما زال `f17f942f0be63ea4564378a2997669a5b5cd4869`. لا دمج ولا نشر.
+HEAD قبل التصحيح: `15a4ce0336fe73837d590d2fcdecd8bb1d8775c7`. إصلاح F01R3: `b8758cd67f015179dd22cc771ee48b4819f0cfdb`. التزام F01R4: `dca85aefd226e366b6a3b7097ccf80b3a4f3ac38`. الفرع `fix/f01-safe-uninstall`. `main` ما زال `f17f942f0be63ea4564378a2997669a5b5cd4869`. لا دمج ولا نشر.
+المقارنة: https://github.com/elsayednegm13/Negm-Loading/compare/main...fix/f01-safe-uninstall
+التزام الإصلاح: https://github.com/elsayednegm13/Negm-Loading/commit/dca85aefd226e366b6a3b7097ccf80b3a4f3ac38
+التقرير: https://github.com/elsayednegm13/Negm-Loading/blob/fix/f01-safe-uninstall/F01_CLOSURE_REPORT_AR.md
 
 ### العطلان والسياسة
 
