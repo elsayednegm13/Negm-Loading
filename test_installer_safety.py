@@ -490,6 +490,8 @@ class TestZipAndUpgradeSafety(unittest.TestCase):
             planned, _dirs = safety.list_zip_payload_paths(zpath)
             with self.assertRaises(safety.InstallSafetyError):
                 safety.assess_destination(root, planned)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.safe_extract_zip(zpath, root)
             with open(os.path.join(root, "app.exe"), encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), "user-owned-same-name")
 
@@ -1189,6 +1191,241 @@ class TestIntegrationOwnership(unittest.TestCase):
             self.assertEqual(_sha(link), custom_hash)
             self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
             winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+
+
+class TestReinstallPreflight(unittest.TestCase):
+    def _installed(self, tmp, payload=b"payload-v1", inside=False):
+        root = os.path.join(tmp, "Negm Lodaing Install")
+        os.makedirs(root)
+        key = _install_owned(root, {"owned.exe": payload})
+        outside = os.path.join(tmp, "outside.txt")
+        _write(outside, "outside-user")
+        inside_path = os.path.join(root, "user-notes.txt")
+        if inside:
+            _write(inside_path, "inside-user")
+        return root, key, outside, inside_path
+
+    def _hashes(self, *paths):
+        return {path: _sha(path) if os.path.isfile(path) else "ABSENT" for path in paths}
+
+    def test_a_modified_cmd_blocks_reinstall_before_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, outside, _inside = self._installed(tmp)
+            cmd = os.path.join(root, safety.UNINSTALL_CMD_FILENAME)
+            payload = os.path.join(root, "owned.exe")
+            with open(cmd, "ab") as handle:
+                handle.write(b"\r\nrem USER LINE keep-me\r\n")
+            before = self._hashes(cmd, payload, outside)
+            zpath = os.path.join(tmp, "next.zip")
+            with zipfile.ZipFile(zpath, "w") as archive:
+                archive.writestr("owned.exe", b"payload-v2")
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            self.assertEqual(self._hashes(cmd, payload, outside), before)
+            with open(cmd, "rb") as handle:
+                self.assertIn(b"USER LINE keep-me", handle.read())
+
+    def test_b_modified_ps1_blocks_reinstall_before_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, outside, _inside = self._installed(tmp)
+            ps1 = os.path.join(root, safety.UNINSTALL_PS1_FILENAME)
+            payload = os.path.join(root, "owned.exe")
+            with open(ps1, "ab") as handle:
+                handle.write(b"\n# USER PS1 keep-me\n")
+            before = self._hashes(ps1, payload, outside)
+            zpath = os.path.join(tmp, "next.zip")
+            with zipfile.ZipFile(zpath, "w") as archive:
+                archive.writestr("owned.exe", b"payload-v2")
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            self.assertEqual(self._hashes(ps1, payload, outside), before)
+
+    def test_c_foreign_temp_and_retiring_are_not_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, _outside, _inside = self._installed(tmp)
+            manifest = os.path.join(root, safety.MANIFEST_FILENAME)
+            temp_file = manifest + ".tmp"
+            retiring = manifest + ".retiring"
+            _write(temp_file, "FOREIGN TMP")
+            _write(retiring, "FOREIGN RETIRING")
+            before = self._hashes(temp_file, retiring, manifest)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.assess_destination(root, ["owned.exe"], anchor_key=key)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.write_uninstall_artifacts(
+                    root, [{"path": "owned.exe", "role": "payload"}], [], anchor_key=key
+                )
+            self.assertEqual(self._hashes(temp_file, retiring, manifest), before)
+            with open(temp_file, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "FOREIGN TMP")
+            with open(retiring, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "FOREIGN RETIRING")
+
+    def test_d_unowned_or_untrusted_uninstaller_is_not_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, _outside, _inside = self._installed(tmp)
+            cmd = os.path.join(root, safety.UNINSTALL_CMD_FILENAME)
+            manifest_path = os.path.join(root, safety.MANIFEST_FILENAME)
+            with open(manifest_path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            data["files"] = [item for item in data["files"] if item["path"] != safety.UNINSTALL_CMD_FILENAME]
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+            safety.write_install_anchor(root, key, safety.load_manifest(root))
+            with open(cmd, "ab") as handle:
+                handle.write(b"\r\nrem unowned\r\n")
+            before = _sha(cmd)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.assess_destination(root, ["owned.exe"], anchor_key=key)
+            self.assertEqual(_sha(cmd), before)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "shared")
+            os.makedirs(root)
+            cmd = os.path.join(root, safety.UNINSTALL_CMD_FILENAME)
+            user = os.path.join(root, "notes.txt")
+            _write(cmd, "not-our-uninstaller")
+            _write(user, "user")
+            before = self._hashes(cmd, user)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.assess_destination(root, ["owned.exe"])
+            self.assertEqual(self._hashes(cmd, user), before)
+
+    def test_e_matching_upgrade_then_uninstalls(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, outside, _inside = self._installed(tmp)
+            zpath = os.path.join(tmp, "next.zip")
+            with zipfile.ZipFile(zpath, "w") as archive:
+                archive.writestr("owned.exe", b"payload-v2")
+            outside_hash = _sha(outside)
+            plan = installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            safety.write_uninstall_artifacts(
+                root, plan["owned_files"], plan["owned_dirs"], anchor_key=key, run_key=key + "\\Run"
+            )
+            with open(os.path.join(root, "owned.exe"), "rb") as handle:
+                self.assertEqual(handle.read(), b"payload-v2")
+            self.assertEqual(_sha(outside), outside_hash)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertEqual(_sha(outside), outside_hash)
+
+    def test_f_anchor_failure_restores_files_and_retry_works(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, outside, inside = self._installed(tmp, inside=True)
+            payload = os.path.join(root, "owned.exe")
+            cmd = os.path.join(root, safety.UNINSTALL_CMD_FILENAME)
+            ps1 = os.path.join(root, safety.UNINSTALL_PS1_FILENAME)
+            manifest = os.path.join(root, safety.MANIFEST_FILENAME)
+            before = self._hashes(payload, cmd, ps1, manifest, outside, inside)
+            zpath = os.path.join(tmp, "next.zip")
+            with zipfile.ZipFile(zpath, "w") as archive:
+                archive.writestr("owned.exe", b"payload-v2")
+            plan = installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            original = safety.write_install_anchor
+            def boom(*_args, **_kwargs):
+                raise safety.InstallSafetyError("injected anchor failure")
+            safety.write_install_anchor = boom
+            try:
+                with self.assertRaises(safety.InstallSafetyError):
+                    safety.write_uninstall_artifacts(
+                        root, plan["owned_files"], plan["owned_dirs"], anchor_key=key, run_key=key + "\\Run"
+                    )
+            finally:
+                safety.write_install_anchor = original
+            installer_safety_restore = safety.restore_write_snapshot(plan["snapshot"])
+            self.assertIsNone(installer_safety_restore)
+            self.assertEqual(self._hashes(payload, cmd, ps1, manifest, outside, inside), before)
+            plan = installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            safety.write_uninstall_artifacts(
+                root, plan["owned_files"], plan["owned_dirs"], anchor_key=key, run_key=key + "\\Run"
+            )
+            with open(payload, "rb") as handle:
+                self.assertEqual(handle.read(), b"payload-v2")
+            with open(inside, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "inside-user")
+
+    def test_g_bad_manifest_anchor_and_reparse_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, outside, inside = self._installed(tmp, inside=True)
+            manifest = os.path.join(root, safety.MANIFEST_FILENAME)
+            before = self._hashes(manifest, outside, inside, os.path.join(root, "owned.exe"))
+            with open(manifest, "ab") as handle:
+                handle.write(b"\nNOT-JSON")
+            zpath = os.path.join(tmp, "next.zip")
+            with zipfile.ZipFile(zpath, "w") as archive:
+                archive.writestr("owned.exe", b"payload-v2")
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            self.assertEqual(_sha(outside), before[outside])
+            with open(inside, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "inside-user")
+        if os.name != "nt":
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, _outside, _inside = self._installed(tmp)
+            owned = os.path.join(root, "owned.exe")
+            target = os.path.join(tmp, "junction-target")
+            os.makedirs(target)
+            secret = os.path.join(target, "secret.txt")
+            _write(secret, "secret")
+            os.remove(owned)
+            if not _try_junction(owned, target):
+                self.skipTest("could not create a junction")
+            secret_hash = _sha(secret)
+            with self.assertRaises(safety.InstallSafetyError):
+                safety.assess_destination(root, ["owned.exe"], anchor_key=key)
+            self.assertEqual(_sha(secret), secret_hash)
+            self.assertTrue(os.path.lexists(owned))
+
+    def test_i_special_characters_round_trip(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        folder = "Negm 'تثبيت' & (ok)!"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, folder)
+            os.makedirs(root)
+            outside = os.path.join(tmp, "user " + folder + ".txt")
+            _write(outside, "keep")
+            before = _sha(outside)
+            _install_owned(root, {"owned.exe": b"payload"})
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertEqual(_sha(outside), before)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+
+    def test_k_engine_preflight_runs_before_copy(self):
+        import inspect
+        source = inspect.getsource(installer_engine.SetupWizard._run_install_worker)
+        self.assertIn("prepare_and_copy_payload", source)
+        self.assertLess(
+            source.find("prepare_and_copy_payload"),
+            source.find("write_safe_uninstaller"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root, key, _outside, _inside = self._installed(tmp)
+            payload = os.path.join(root, "owned.exe")
+            before = _sha(payload)
+            cmd = os.path.join(root, safety.UNINSTALL_CMD_FILENAME)
+            with open(cmd, "ab") as handle:
+                handle.write(b"\r\nrem block\r\n")
+            zpath = os.path.join(tmp, "next.zip")
+            with zipfile.ZipFile(zpath, "w") as archive:
+                archive.writestr("owned.exe", b"should-not-land")
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            self.assertEqual(_sha(payload), before)
+            with open(payload, "rb") as handle:
+                self.assertNotIn(b"should-not-land", handle.read())
+
+    def test_quote_in_shortcut_path_is_not_executed(self):
+        link = os.path.join(tempfile.gettempdir(), 'bad"name.lnk')
+        outcome = installer_engine.create_windows_shortcut(
+            r"C:\Windows\notepad.exe", link, "desc", r"C:\Windows\notepad.exe"
+        )
+        self.assertEqual(outcome, "failed")
+        self.assertFalse(os.path.exists(link))
 
 
 def _value_exists(key, name):

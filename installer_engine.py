@@ -40,9 +40,19 @@ def get_default_install_dir():
     prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
     return os.path.join(prog_files, DEFAULT_INSTALL_SUBDIR)
 
+def _shortcut_argument_safe(value):
+    return isinstance(value, str) and value and not any(char in value for char in ('"', "\r", "\n"))
+
+
 def create_windows_shortcut(target_exe, shortcut_path, description="NegmLoading", icon_path=""):
     """Create a shortcut only when the path is absent. Never overwrite an existing file."""
     try:
+        if not _shortcut_argument_safe(target_exe) or not _shortcut_argument_safe(shortcut_path):
+            return "failed"
+        if description and not _shortcut_argument_safe(description):
+            return "failed"
+        if icon_path and not _shortcut_argument_safe(icon_path):
+            return "failed"
         if os.path.lexists(shortcut_path):
             return "preserved"
         os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
@@ -73,6 +83,78 @@ lnk.Save
     except Exception as e:
         print("Shortcut error:", e)
         return "failed"
+
+def prepare_and_copy_payload(dest, payload_zip_path=None, *, startup=False, anchor_key=None, run_key=None):
+    """Preflight every planned write, then copy the payload.
+
+    A refusal happens before the copy. If the copy itself fails, files this
+    function replaced are restored. This is not a cross-registry transaction.
+    """
+    dest = installer_safety.validate_install_root(dest)
+    if payload_zip_path and os.path.exists(payload_zip_path):
+        planned, _zip_dirs = installer_safety.list_zip_payload_paths(payload_zip_path)
+    else:
+        planned = []
+        src_exe = os.path.join("dist", f"{APP_NAME}.exe")
+        if os.path.exists(src_exe):
+            planned.append(f"{APP_NAME}.exe")
+        if os.path.exists("browser_extension"):
+            planned.extend(installer_safety.list_tree_file_relpaths("browser_extension", "browser_extension"))
+        if os.path.exists("assets"):
+            planned.extend(installer_safety.list_tree_file_relpaths("assets", "assets"))
+    dest, created_root, manifest = installer_safety.assess_destination(
+        dest, planned, anchor_key=anchor_key
+    )
+    target_exe = os.path.join(dest, f"{APP_NAME}.exe")
+    if sys.platform == "win32":
+        installer_safety.assert_uninstall_key_available(
+            anchor_key or installer_safety.DEFAULT_UNINSTALL_KEY, dest
+        )
+        if startup:
+            installer_safety.assert_run_value_available(
+                run_key or installer_safety.DEFAULT_RUN_KEY, APP_NAME, target_exe
+            )
+    snapshot_rels = installer_safety.install_write_relpaths(planned) + [installer_safety.MANIFEST_FILENAME]
+    snapshot = installer_safety.capture_write_snapshot(dest, snapshot_rels)
+    os.makedirs(dest, exist_ok=True)
+    expected = installer_safety.owned_hash_map(manifest)
+    try:
+        owned_files = []
+        owned_dirs = []
+        if payload_zip_path and os.path.exists(payload_zip_path):
+            owned_files, owned_dirs = installer_safety.safe_extract_zip(
+                payload_zip_path, dest, expected_by_rel=expected
+            )
+        else:
+            src_exe = os.path.join("dist", f"{APP_NAME}.exe")
+            if os.path.exists(src_exe):
+                owned_files.append(installer_safety.safe_copy_file(
+                    src_exe, dest, f"{APP_NAME}.exe",
+                    expected_sha=expected.get(os.path.normcase(f"{APP_NAME}.exe")),
+                ))
+            if os.path.exists("browser_extension"):
+                files, dirs = installer_safety.safe_copy_tree(
+                    "browser_extension", dest, "browser_extension", expected_by_rel=expected
+                )
+                owned_files.extend(files)
+                owned_dirs.extend(dirs)
+            if os.path.exists("assets"):
+                files, dirs = installer_safety.safe_copy_tree(
+                    "assets", dest, "assets", expected_by_rel=expected
+                )
+                owned_files.extend(files)
+                owned_dirs.extend(dirs)
+    except Exception:
+        installer_safety.restore_write_snapshot(snapshot)
+        raise
+    return {
+        "dest": dest,
+        "created_root": created_root,
+        "owned_files": owned_files,
+        "owned_dirs": owned_dirs,
+        "snapshot": snapshot,
+    }
+
 
 def write_safe_uninstaller(install_dir, owned_files, owned_dirs, created_root=False, shortcut_paths=None):
     return installer_safety.write_uninstall_artifacts(
@@ -242,51 +324,20 @@ class SetupWizard(ctk.CTk):
         threading.Thread(target=self._run_install_worker, daemon=True).start()
 
     def _run_install_worker(self):
-        dest = os.path.normpath(self.install_dir.get())
-        owned_files = []
-        owned_dirs = []
-
+        plan = None
+        committed = False
         try:
-            dest = installer_safety.validate_install_root(dest)
-            if os.path.exists(self.payload_zip_path):
-                planned, _zip_dirs = installer_safety.list_zip_payload_paths(self.payload_zip_path)
-            else:
-                planned = []
-                src_exe = os.path.join("dist", f"{APP_NAME}.exe")
-                if os.path.exists(src_exe):
-                    planned.append(f"{APP_NAME}.exe")
-                if os.path.exists("browser_extension"):
-                    planned.extend(installer_safety.list_tree_file_relpaths("browser_extension", "browser_extension"))
-                if os.path.exists("assets"):
-                    planned.extend(installer_safety.list_tree_file_relpaths("assets", "assets"))
-            dest, created_root, _old_manifest = installer_safety.assess_destination(dest, planned)
-            target_exe = os.path.join(dest, f"{APP_NAME}.exe")
-            if sys.platform == "win32":
-                installer_safety.assert_uninstall_key_available(
-                    installer_safety.DEFAULT_UNINSTALL_KEY, dest
-                )
-                if self.chk_startup.get():
-                    installer_safety.assert_run_value_available(
-                        installer_safety.DEFAULT_RUN_KEY, APP_NAME, target_exe
-                    )
-            os.makedirs(dest, exist_ok=True)
-
             self._set_prog(0.1, "استخراج ملفات البرنامج...")
-            if os.path.exists(self.payload_zip_path):
-                owned_files, owned_dirs = installer_safety.safe_extract_zip(self.payload_zip_path, dest)
-                self._set_prog(0.7, "اكتمل استخراج الحزمة")
-            else:
-                src_exe = os.path.join("dist", f"{APP_NAME}.exe")
-                if os.path.exists(src_exe):
-                    owned_files.append(installer_safety.safe_copy_file(src_exe, dest, f"{APP_NAME}.exe"))
-                if os.path.exists("browser_extension"):
-                    files, dirs = installer_safety.safe_copy_tree("browser_extension", dest, "browser_extension")
-                    owned_files.extend(files)
-                    owned_dirs.extend(dirs)
-                if os.path.exists("assets"):
-                    files, dirs = installer_safety.safe_copy_tree("assets", dest, "assets")
-                    owned_files.extend(files)
-                    owned_dirs.extend(dirs)
+            plan = prepare_and_copy_payload(
+                os.path.normpath(self.install_dir.get()),
+                self.payload_zip_path,
+                startup=bool(self.chk_startup.get()),
+            )
+            dest = plan["dest"]
+            created_root = plan["created_root"]
+            owned_files = plan["owned_files"]
+            owned_dirs = plan["owned_dirs"]
+            self._set_prog(0.7, "اكتمل استخراج الحزمة")
 
             self._set_prog(0.75, "إنشاء اختصارات سطح المكتب وقائمة ابدأ...")
             target_exe = os.path.join(dest, f"{APP_NAME}.exe")
@@ -322,6 +373,7 @@ class SetupWizard(ctk.CTk):
                 dest, owned_files, owned_dirs, created_root=created_root,
                 shortcut_paths=created_shortcuts,
             )
+            committed = True
             register_uninstall(dest, uninstaller_path)
 
             if self.chk_startup.get() and sys.platform == "win32":
@@ -335,6 +387,8 @@ class SetupWizard(ctk.CTk):
             self._set_prog(1.0, "اكتمل التثبيت بنجاح!")
             self.after(500, self.show_step_4)
         except Exception as e:
+            if plan is not None and not committed:
+                installer_safety.restore_write_snapshot(plan["snapshot"])
             self._set_prog(1.0, f"خطأ أثناء التثبيت: {str(e)[:70]}")
             self.after(1000, lambda: self.btn_next.configure(state="normal", text="إغلاق", command=self.destroy))
 

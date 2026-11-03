@@ -14,9 +14,9 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
+import tempfile
 import uuid
 import zipfile
 
@@ -218,7 +218,77 @@ def list_zip_payload_paths(zip_path):
     return files, directories
 
 
+BLOCKING_TEMP_NAMES = (
+    MANIFEST_FILENAME + ".tmp",
+    MANIFEST_FILENAME + ".retiring",
+)
+ARTIFACT_RELPATHS = (UNINSTALL_CMD_FILENAME, UNINSTALL_PS1_FILENAME)
+
+
+def _binary_flag():
+    return os.O_BINARY if hasattr(os, "O_BINARY") else 0
+
+
+def owned_hash_map(manifest):
+    mapping = {}
+    if not manifest:
+        return mapping
+    for entry in manifest.get("files", []):
+        mapping[os.path.normcase(entry["path"])] = entry["sha256"].lower()
+    return mapping
+
+
+def install_write_relpaths(payload_relpaths):
+    ordered = []
+    seen = set()
+    for rel in list(payload_relpaths or []) + list(ARTIFACT_RELPATHS):
+        rel_n = validate_relative_path(rel)
+        key = os.path.normcase(rel_n)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(rel_n)
+    return ordered
+
+
+def assert_no_blocking_temps(root):
+    """A foreign temp or recovery name is never replaced or deleted."""
+    for name in BLOCKING_TEMP_NAMES:
+        path = os.path.join(root, name)
+        if os.path.lexists(path):
+            raise InstallSafetyError(
+                "ملف مؤقت أو استرداد موجود ولن يُستبدل أو يُحذف: %s" % name
+            )
+
+
+def assert_existing_writes_are_owned(root, relpaths, manifest):
+    owned = owned_hash_map(manifest)
+    for rel in relpaths:
+        try:
+            target = resolve_owned_path(root, rel)
+        except PathSafetyError as exc:
+            raise InstallSafetyError("payload path is not safe to write") from exc
+        if not os.path.lexists(target):
+            continue
+        if is_reparse_point(target) or not os.path.isfile(target):
+            raise InstallSafetyError("لن يتم استبدال مسار ليس ملفًا عاديًا: %s" % rel)
+        expected = owned.get(os.path.normcase(rel))
+        if not expected:
+            raise InstallSafetyError("ملف موجود وغير مملوك لهذا التثبيت. لن يتم استبداله: %s" % rel)
+        try:
+            current = sha256_file(target)
+        except OSError as exc:
+            raise InstallSafetyError("تعذر فحص الملف قبل الكتابة: %s" % rel) from exc
+        if current.lower() != expected:
+            raise InstallSafetyError("ملف مملوك تغيّر. لن يتم استبداله: %s" % rel)
+
+
 def assess_destination(dest, payload_relpaths, anchor_key=None):
+    """Refuse a nonempty destination before any install write.
+
+    The checked set is the payload plus uninstall.cmd and the PowerShell helper.
+    A fixed manifest temp or .retiring file blocks the install and is not deleted.
+    """
     root = validate_install_root(dest)
     created_root = not os.path.isdir(root)
     if created_root:
@@ -243,33 +313,8 @@ def assess_destination(dest, payload_relpaths, anchor_key=None):
         raise InstallSafetyError(
             "بيان التثبيت غير مربوط بمرساة التثبيت. لن يتم استبدال أي ملف."
         ) from exc
-    owned_by_path = {}
-    for entry in manifest.get("files", []):
-        owned_by_path[os.path.normcase(entry["path"])] = entry
-
-    for rel in payload_relpaths:
-        rel_n = validate_relative_path(rel)
-        try:
-            target = resolve_owned_path(root, rel_n)
-        except PathSafetyError as exc:
-            raise InstallSafetyError("payload path is not safe to write") from exc
-        if not os.path.lexists(target):
-            continue
-        if os.path.isdir(target) and not os.path.isfile(target):
-            raise InstallSafetyError("payload file would replace a directory")
-        key = os.path.normcase(rel_n)
-        previous = owned_by_path.get(key)
-        if previous is None:
-            raise InstallSafetyError(
-                "ملف موجود مسبقاً وغير مسجّل في بيان التثبيت. لن يتم استبداله."
-            )
-        if is_reparse_point(target):
-            raise InstallSafetyError("existing payload target is a reparse point")
-        current_hash = sha256_file(target)
-        if current_hash.lower() != previous.get("sha256", ""):
-            raise InstallSafetyError(
-                "ملف تابع للتثبيت تم تعديله. لن يتم استبداله حفاظاً على بيانات المستخدم."
-            )
+    assert_no_blocking_temps(root)
+    assert_existing_writes_are_owned(root, install_write_relpaths(payload_relpaths), manifest)
     return root, False, manifest
 
 
@@ -286,19 +331,118 @@ def build_file_entry(root, relpath, role="payload"):
     }
 
 
-def safe_copy_file(src, dest_root, relpath, role="payload"):
+def _create_exclusive_bytes(dest_path, data):
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | _binary_flag()
+    try:
+        fd = os.open(dest_path, flags)
+    except FileExistsError as exc:
+        raise InstallSafetyError("الملف ظهر قبل إنشائه. لن يتم الاستبدال.") from exc
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        raise
+
+
+def _replace_bytes_if_unchanged(dest_path, data, expected_sha):
+    if is_reparse_point(dest_path) or not os.path.isfile(dest_path):
+        raise InstallSafetyError("لن يتم استبدال مسار ليس ملفًا عاديًا.")
+    if sha256_file(dest_path).lower() != expected_sha.lower():
+        raise InstallSafetyError("تغير الملف قبل استبداله. لن يتم الاستبدال.")
+    directory = os.path.dirname(dest_path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".negm-write-", dir=directory)
+    tmp_path = tmp
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if sha256_file(dest_path).lower() != expected_sha.lower() or is_reparse_point(dest_path):
+            raise InstallSafetyError("تغير الملف قبل استبداله. لن يتم الاستبدال.")
+        os.replace(tmp, dest_path)
+        tmp_path = None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def write_bytes_owned(dest_path, data, expected_sha=None):
+    """Create a new file exclusively, or replace one whose bytes still match."""
+    if not os.path.lexists(dest_path):
+        _create_exclusive_bytes(dest_path, data)
+        return
+    if not expected_sha:
+        raise InstallSafetyError("ملف موجود وغير مملوك. لن يتم استبداله.")
+    _replace_bytes_if_unchanged(dest_path, data, expected_sha)
+
+
+def capture_write_snapshot(root, relpaths):
+    """Bytes of write-set files before an install. None means the path was absent."""
+    snapshot = {}
+    for rel in relpaths:
+        target = resolve_owned_path(root, rel)
+        if not os.path.lexists(target):
+            snapshot[target] = None
+            continue
+        if is_reparse_point(target) or not os.path.isfile(target):
+            raise InstallSafetyError("لن يتم أخذ نسخة من مسار ليس ملفًا عاديًا: %s" % rel)
+        with open(target, "rb") as handle:
+            snapshot[target] = handle.read()
+    return snapshot
+
+
+def restore_write_snapshot(snapshot):
+    """Put back only paths this install snapshotted. Never a recursive root delete."""
+    if not snapshot:
+        return
+    for path, data in snapshot.items():
+        if data is None:
+            if os.path.isfile(path) and not is_reparse_point(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            continue
+        directory = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".negm-restore-", dir=directory)
+        tmp_path = tmp
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            tmp_path = None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+
+def safe_copy_file(src, dest_root, relpath, role="payload", expected_sha=None):
     rel = validate_relative_path(relpath)
     dest_path = resolve_owned_path(dest_root, rel)
     parent = os.path.dirname(dest_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    if os.path.lexists(dest_path) and (is_reparse_point(dest_path) or not os.path.isfile(dest_path)):
-        raise InstallSafetyError("refusing to overwrite a non-regular existing path")
-    shutil.copy2(src, dest_path)
+    with open(src, "rb") as handle:
+        data = handle.read()
+    write_bytes_owned(dest_path, data, expected_sha=expected_sha)
     return build_file_entry(dest_root, rel, role)
 
 
-def safe_copy_tree(src_dir, dest_root, dest_prefix, role="payload"):
+def safe_copy_tree(src_dir, dest_root, dest_prefix, role="payload", expected_by_rel=None):
     prefix = validate_relative_path(dest_prefix)
     files = []
     directories = [prefix]
@@ -313,12 +457,16 @@ def safe_copy_tree(src_dir, dest_root, dest_prefix, role="payload"):
             os.makedirs(os.path.join(dest_root, dest_rel_dir), exist_ok=True)
         for filename in filenames:
             rel = validate_relative_path(dest_rel_dir + "\\" + filename)
-            files.append(safe_copy_file(os.path.join(current, filename), dest_root, rel, role))
+            expected = (expected_by_rel or {}).get(os.path.normcase(rel))
+            files.append(safe_copy_file(
+                os.path.join(current, filename), dest_root, rel, role, expected_sha=expected
+            ))
     return files, directories
 
 
-def safe_extract_zip(zip_path, dest_root, role="payload"):
+def safe_extract_zip(zip_path, dest_root, role="payload", expected_by_rel=None):
     root = validate_install_root(dest_root)
+    expected = {os.path.normcase(key): value for key, value in (expected_by_rel or {}).items()}
     files = []
     directories = []
     with zipfile.ZipFile(zip_path, "r") as archive:
@@ -339,10 +487,9 @@ def safe_extract_zip(zip_path, dest_root, role="payload"):
                 parent_rel = os.path.relpath(parent, root)
                 if parent_rel not in (".", ""):
                     directories.append(validate_relative_path(parent_rel.replace("/", "\\")))
-            if os.path.lexists(dest_path) and (is_reparse_point(dest_path) or not os.path.isfile(dest_path)):
-                raise InstallSafetyError("refusing to overwrite a non-regular existing path")
-            with archive.open(info, "r") as src, open(dest_path, "wb") as out:
-                shutil.copyfileobj(src, out)
+            with archive.open(info, "r") as src:
+                data = src.read()
+            write_bytes_owned(dest_path, data, expected_sha=expected.get(os.path.normcase(rel)))
             files.append(build_file_entry(root, rel, role))
     return files, _unique_dirs(directories)
 
@@ -536,12 +683,13 @@ def write_manifest(install_root, files, directories, app_name=DEFAULT_APP_NAME,
                       for item in (shortcuts or [])],
     }
     dest = os.path.join(root, MANIFEST_FILENAME)
-    tmp = dest + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, dest)
+    raw = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+    expected = None
+    if os.path.lexists(dest):
+        if is_reparse_point(dest) or not os.path.isfile(dest):
+            raise InstallSafetyError("لن يتم استبدال بيان ليس ملفًا عاديًا.")
+        expected = sha256_file(dest)
+    write_bytes_owned(dest, raw, expected_sha=expected)
     return dest
 
 
@@ -1126,25 +1274,51 @@ def write_uninstall_artifacts(install_root, owned_files, owned_dirs, app_name=DE
 
     ps1_path = os.path.join(root, UNINSTALL_PS1_FILENAME)
     cmd_path = os.path.join(root, UNINSTALL_CMD_FILENAME)
-    with open(ps1_path, "w", encoding="utf-8-sig", newline="\n") as handle:
-        handle.write(ps1_text)
-    with open(cmd_path, "w", encoding="ascii", newline="") as handle:
-        handle.write(cmd_text)
-
-    all_files = list(owned_files)
-    for rel in (UNINSTALL_PS1_FILENAME, UNINSTALL_CMD_FILENAME):
-        all_files.append({"path": rel, "role": "artifact"})
-    # Hash shortcut files here, after they exist and before the manifest and anchor.
-    write_manifest(
-        root,
-        all_files,
-        owned_dirs,
-        app_name=app,
-        app_version=app_version,
-        created_root=created_root,
-        shortcuts=shortcut_paths or [],
-    )
-    write_install_anchor(root, anchor_key, load_manifest(root))
+    manifest_path = os.path.join(root, MANIFEST_FILENAME)
+    assert_no_blocking_temps(root)
+    previous = None
+    if os.path.lexists(manifest_path):
+        if is_reparse_point(manifest_path) or not os.path.isfile(manifest_path):
+            raise InstallSafetyError("لن يتم استبدال بيان ليس ملفًا عاديًا.")
+        previous = load_manifest(root)
+        verify_install_anchor(root, previous, anchor_key)
+        assert_existing_writes_are_owned(root, list(ARTIFACT_RELPATHS), previous)
+    else:
+        for name in ARTIFACT_RELPATHS:
+            if os.path.lexists(os.path.join(root, name)):
+                raise InstallSafetyError(
+                    "ملف إزالة موجود بلا بيان موثوق. لن يتم استبداله: %s" % name
+                )
+    owned_hashes = owned_hash_map(previous)
+    backups = capture_write_snapshot(root, list(ARTIFACT_RELPATHS) + [MANIFEST_FILENAME])
+    try:
+        write_bytes_owned(
+            ps1_path,
+            ps1_text.encode("utf-8-sig"),
+            expected_sha=owned_hashes.get(os.path.normcase(UNINSTALL_PS1_FILENAME)),
+        )
+        write_bytes_owned(
+            cmd_path,
+            cmd_text.encode("ascii"),
+            expected_sha=owned_hashes.get(os.path.normcase(UNINSTALL_CMD_FILENAME)),
+        )
+        all_files = list(owned_files)
+        for rel in (UNINSTALL_PS1_FILENAME, UNINSTALL_CMD_FILENAME):
+            all_files.append({"path": rel, "role": "artifact"})
+        # Hash shortcut files here, after they exist and before the manifest and anchor.
+        write_manifest(
+            root,
+            all_files,
+            owned_dirs,
+            app_name=app,
+            app_version=app_version,
+            created_root=created_root,
+            shortcuts=shortcut_paths or [],
+        )
+        write_install_anchor(root, anchor_key, load_manifest(root))
+    except Exception:
+        restore_write_snapshot(backups)
+        raise
     return cmd_path
 
 
@@ -1519,7 +1693,7 @@ if ((Test-Path -LiteralPath $ManifestPath -PathType Leaf) -and -not (Test-Repars
         exit 4
     }
 }
-$retiring = $ManifestPath + '.retiring'
+$retiring = $ManifestPath + '.retiring-' + [guid]::NewGuid().ToString('N')
 $movedManifest = $false
 if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
     try {
