@@ -8,6 +8,7 @@ import sys
 import time
 import tempfile
 import unittest
+from unittest.mock import patch
 import base64
 
 import nexus_engine as E
@@ -130,11 +131,11 @@ class TestPhase11Dialogs(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if cls.app is not None:
-            try:
-                cls.app.is_closing = True
-                cls.app.destroy()
-            except Exception:
-                pass
+            # Use the real lifecycle shutdown; bypassing on_close leaks tray/bridge threads.
+            # Prevent this test-only cleanup from writing application state.
+            cls.app.force_exit = True
+            with patch.object(cls.app, "save_state"):
+                cls.app.on_close()
 
     def setUp(self):
         if self.app is None:
