@@ -11,7 +11,8 @@
 | إصلاح إعادة التثبيت المفحوص | `7c3d857df975ea21d08f765131bcd07ef4378802` |
 | `main` | `f17f942f0be63ea4564378a2997669a5b5cd4869`، لم يُمس |
 | حالة العمل قبل البدء | نظيفة، تتبع `origin` |
-| SHA هذا الإصلاح | يُسجَّل في التزام التنفيذ فوق `7e67fd2` |
+| SHA هذا الإصلاح | `eb3dd147c72c032a4c5a8bb3b3ddcf5b057ca0a8` |
+| الرابط | https://github.com/elsayednegm13/Negm-Loading/commit/eb3dd147c72c032a4c5a8bb3b3ddcf5b057ca0a8 |
 
 الملفات المتغيرة: `installer_safety.py`، `test_installer_safety.py`، وأدلة `f01-evidence/f01-shortcut-upgrade-repro-*.txt` و`unittest-f01-accept.*` و`run-all-tests-f01-accept.*`. `installer_engine.py` لم يحتج إلى تعديل: المعالج يمرر الاختصارات الجديدة فقط، والحفظ صار داخل `write_uninstall_artifacts` بعد التحقق من البيان والمرساة.
 
