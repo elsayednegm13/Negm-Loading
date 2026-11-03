@@ -37,8 +37,9 @@ HEAD قبل التصحيح: `15a4ce0336fe73837d590d2fcdecd8bb1d8775c7`. إصلا
 - `python -m compileall -q installer_engine.py installer_safety.py test_installer_safety.py`: خروج **0**.
 - `python run_all_tests.py`: النص `[SUCCESS]`، 85 اختبارًا، SKIP واحد، 55.539 ثانية. العملية لم تعد. رمز الغلاف بعد الإيقاف **-1**. ليس خروجًا طبيعيًا 0. `f01-evidence/run-all-tests-f01r4.txt`.
 - `git diff --check`: خروج **0** قبل الالتزام.
-- symlink: SKIP. لم تُفعَّل صلاحيات جديدة.
-- Sandbox/VM ونسخة PyInstaller لهذه الجولة: **NOT TESTED**. لم يُبنَ مثبت جديد هنا ولم يُشغَّل.
+- symlink: SKIP. `os.symlink` أعاد `OSError` برمز Windows `1314` (`ERROR_PRIVILEGE_NOT_HELD`). لم يُغيَّر Developer Mode ولم تُرفع صلاحيات الجهاز. ليس PASS.
+- Sandbox/VM: **NOT TESTED**. `WindowsSandbox.exe` غير موجود، ولم تُشغَّل الإزالة على تثبيت حقيقي.
+- PyInstaller: بُني خارج المستودع ولم يُشغَّل. الملف `C:\Users\NEGM\AppData\Local\Temp\negm-f01r4-setup-build\dist\NegmLoading-Setup.exe`. الحجم `19814554`. SHA-256 `babf2af3d61273c379de460215ec6bacdef0e8d4183a784177a799618163ffc8`. السجل `f01-evidence/windows-build-f01r4.txt`. البناء ليس اختبار تثبيت/إزالة.
 
 ### حد المرساة والتوافق
 
