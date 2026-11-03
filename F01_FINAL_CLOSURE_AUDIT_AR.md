@@ -1,6 +1,10 @@
 # F01_FINAL_CLOSURE_AUDIT_AR
 
-فحص سلامة إعادة التثبيت بعد `fde0e7087270d7d43cbb813aac4051d9ead7df95`. المرحلة لم تُغلق. لا دمج ولا نشر، و`main` بقي `f17f942f0be63ea4564378a2997669a5b5cd4869`.
+فحص سلامة إعادة التثبيت بعد `fde0e7087270d7d43cbb813aac4051d9ead7df95`. التزام التنفيذ: `7c3d857df975ea21d08f765131bcd07ef4378802`.
+
+https://github.com/elsayednegm13/Negm-Loading/commit/7c3d857df975ea21d08f765131bcd07ef4378802
+
+المرحلة لم تُغلق. لا دمج ولا نشر، و`main` بقي `f17f942f0be63ea4564378a2997669a5b5cd4869`.
 
 ## الهدف والنطاق
 
