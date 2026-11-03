@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: python -m compileall -q installer_engine.py installer_safety.py test_installer_safety.py
       - name: Execute F01 tests with real process exit code
-        shell: pwsh
+        shell: cmd
         run: python .github/scripts/f01_ci_watchdog.py safety
       - name: Preserve safety evidence even if tests fail
         if: always()
@@ -62,7 +62,7 @@ jobs:
         shell: pwsh
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Run suite with traceback on hang, without masking exit
-        shell: pwsh
+        shell: cmd
         run: python .github/scripts/f01_ci_watchdog.py full
       - name: Preserve full-suite evidence even if process hangs
         if: always()
