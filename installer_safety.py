@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import uuid
 import zipfile
 
@@ -391,6 +392,88 @@ def validate_shortcut_path(path):
     return absolute
 
 
+def _powershell_exe():
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def read_shortcut_target(path):
+    """Return the shortcut TargetPath. The caller treats a failure as ambiguity."""
+    if os.name != "nt":
+        raise OSError("shortcut targets are only read on Windows")
+    env = os.environ.copy()
+    env["F01_LNK"] = path
+    completed = subprocess.run(
+        [_powershell_exe(), "-NoProfile", "-Command",
+         "$s=New-Object -ComObject WScript.Shell; "
+         "$l=$s.CreateShortcut($env:F01_LNK); "
+         "Write-Output $l.TargetPath"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise OSError(completed.stderr or completed.stdout or "shortcut target unreadable")
+    return (completed.stdout or "").strip()
+
+
+def describe_shortcut(path):
+    """Hash a .lnk that already exists. A missing file is recorded as path-only."""
+    absolute = validate_shortcut_path(path)
+    empty = {"path": absolute, "sha256": "", "target": ""}
+    if os.name != "nt" or not os.path.isfile(absolute) or is_reparse_point(absolute):
+        return empty
+    try:
+        digest = sha256_file(absolute)
+        target = read_shortcut_target(absolute)
+    except OSError:
+        return empty
+    if not target or any(char in target for char in ("\x00", "\r", "\n", "\t")):
+        return empty
+    return {"path": absolute, "sha256": digest, "target": target}
+
+
+def _normalize_shortcut_entry(item):
+    if isinstance(item, str):
+        return {"path": validate_shortcut_path(item), "sha256": "", "target": ""}
+    if not isinstance(item, dict):
+        raise InstallSafetyError("install manifest shortcut is invalid")
+    path = validate_shortcut_path(item.get("path"))
+    digest = item.get("sha256") or ""
+    target = item.get("target") or ""
+    if digest:
+        if not isinstance(digest, str) or not _SHA256_RE.match(digest.lower()):
+            raise InstallSafetyError("install manifest shortcut hash is invalid")
+        digest = digest.lower()
+    else:
+        digest = ""
+    if not isinstance(target, str) or any(char in target for char in ("\x00", "\r", "\n", "\t")):
+        raise InstallSafetyError("install manifest shortcut target is invalid")
+    if not digest or not target:
+        return {"path": path, "sha256": "", "target": ""}
+    return {"path": path, "sha256": digest, "target": target}
+
+
+def _public_shortcut(record):
+    if record.get("sha256"):
+        return {
+            "path": record["path"],
+            "sha256": record["sha256"],
+            "target": record["target"],
+        }
+    return {"path": record["path"]}
+
+
+def _shortcut_fingerprint_lines(shortcuts):
+    lines = []
+    for record in sorted(shortcuts, key=lambda item: item["path"]):
+        if record.get("sha256"):
+            lines.append("S\t%s\t%s\t%s" % (record["path"], record["sha256"], record["target"]))
+        else:
+            lines.append("S\t%s" % record["path"])
+    return lines
+
+
 def load_manifest(install_root, expected_app_name=None):
     root = validate_install_root(install_root)
     manifest_path = os.path.join(root, MANIFEST_FILENAME)
@@ -421,7 +504,7 @@ def load_manifest(install_root, expected_app_name=None):
     shortcuts = data.get("shortcuts", [])
     if not isinstance(shortcuts, list):
         raise InstallSafetyError("install manifest shortcuts are invalid")
-    safe_shortcuts = [validate_shortcut_path(item) for item in shortcuts]
+    safe_shortcuts = [_normalize_shortcut_entry(item) for item in shortcuts]
     created_root = data.get("created_root") is True
     return {
         "version": MANIFEST_VERSION,
@@ -449,7 +532,8 @@ def write_manifest(install_root, files, directories, app_name=DEFAULT_APP_NAME,
                   for item in files],
         "directories": [{"path": validate_relative_path(item["path"] if isinstance(item, dict) else item)}
                         for item in directories],
-        "shortcuts": [validate_shortcut_path(item) for item in (shortcuts or [])],
+        "shortcuts": [_public_shortcut(describe_shortcut(item["path"] if isinstance(item, dict) else item))
+                      for item in (shortcuts or [])],
     }
     dest = os.path.join(root, MANIFEST_FILENAME)
     tmp = dest + ".tmp"
@@ -493,8 +577,7 @@ def manifest_fingerprint(manifest):
         lines.append("F\t%s\t%s\t%d" % (entry["path"], entry["sha256"].lower(), int(entry["size"])))
     for entry in sorted(manifest.get("directories", []), key=lambda item: item["path"]):
         lines.append("D\t%s" % entry["path"])
-    for path in sorted(manifest.get("shortcuts") or []):
-        lines.append("S\t%s" % path)
+    lines.extend(_shortcut_fingerprint_lines(manifest.get("shortcuts") or []))
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
@@ -826,6 +909,23 @@ def safe_uninstall(install_root, expected_app_name=DEFAULT_APP_NAME, anchor_key=
             "Manifest and uninstall scripts were kept.",
         )
 
+    shortcut_state = _apply_recorded_shortcuts(root, manifest, result)
+    if shortcut_state == "failed":
+        return _stop_uninstall(
+            result,
+            EXIT_FINAL,
+            "MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed for an owned shortcut. "
+            "Manifest, anchor, and uninstall scripts were kept. Retry is possible. Exit code 4.",
+        )
+    if shortcut_state == "modified":
+        return _stop_uninstall(
+            result,
+            EXIT_FINAL,
+            "MANUAL CLEANUP REQUIRED: a recorded shortcut was modified after install and was kept. "
+            "Full cleanup was not completed. Delete or restore that shortcut manually if you want it removed. "
+            "Manifest, anchor, and uninstall scripts were kept. Exit code 4.",
+        )
+
     if not retire_matching_anchor(anchor_key, root):
         return _stop_uninstall(
             result,
@@ -875,8 +975,72 @@ def safe_uninstall(install_root, expected_app_name=DEFAULT_APP_NAME, anchor_key=
 
     result["exit_code"] = EXIT_OK
     result["manual_cleanup"] = False
-    result["message"] = "owned files removed"
+    if result.get("shortcut_notes"):
+        result["message"] = "owned files removed; shortcuts without a verified fingerprint were kept"
+    else:
+        result["message"] = "owned files removed"
     return result
+
+
+def _apply_recorded_shortcuts(root, manifest, result):
+    """Delete a shortcut only when its recorded path, target, and bytes still match.
+
+    A path-only manifest entry is not content ownership. A changed or unreadable
+    shortcut is kept. The SHA-256 is bound to the install anchor; it is not a
+    signature against the same user.
+    """
+    failed = False
+    modified = False
+    notes = []
+    for record in manifest.get("shortcuts") or []:
+        path = record["path"]
+        if not os.path.lexists(path):
+            continue
+        if is_reparse_point(path) or not os.path.isfile(path):
+            failed = True
+            result["preserved"].append(path)
+            continue
+        if not record.get("sha256"):
+            notes.append(path)
+            continue
+        try:
+            current = sha256_file(path)
+        except OSError:
+            failed = True
+            result["preserved"].append(path)
+            continue
+        if current != record["sha256"]:
+            modified = True
+            result["preserved"].append(path)
+            continue
+        try:
+            target = read_shortcut_target(path)
+        except OSError:
+            target = ""
+        if not target or os.path.normcase(target) != os.path.normcase(record.get("target") or ""):
+            failed = True
+            result["preserved"].append(path)
+            continue
+        if not is_within_root(root, target):
+            notes.append(path)
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            failed = True
+            result["preserved"].append(path)
+            continue
+        if os.path.lexists(path):
+            failed = True
+            result["preserved"].append(path)
+            continue
+        result["deleted"].append(path)
+    result["shortcut_notes"] = notes
+    if failed:
+        return "failed"
+    if modified:
+        return "modified"
+    return "ok"
 
 
 def default_shortcut_paths(app_name):
@@ -929,7 +1093,7 @@ exit /b 2\r
 echo __APP_NAME__ owned files were removed.\r
 exit /b 0\r
 :FinalReported\r
-echo MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed. Recovery scripts were kept. Exit code 4.\r
+echo MANUAL CLEANUP REQUIRED: payload was removed but final cleanup is incomplete. Recovery scripts were kept. Exit code 4.\r
 exit /b 4\r
 """
 
@@ -970,6 +1134,7 @@ def write_uninstall_artifacts(install_root, owned_files, owned_dirs, app_name=DE
     all_files = list(owned_files)
     for rel in (UNINSTALL_PS1_FILENAME, UNINSTALL_CMD_FILENAME):
         all_files.append({"path": rel, "role": "artifact"})
+    # Hash shortcut files here, after they exist and before the manifest and anchor.
     write_manifest(
         root,
         all_files,
@@ -1049,6 +1214,32 @@ function Resolve-Owned([string]$Rel) {
     return $full
 }
 
+function Get-ShortcutIdentity($item) {
+    if ($null -eq $item) { return $null }
+    $path = ''
+    $sha = ''
+    $target = ''
+    if ($item -is [string]) {
+        $path = [string]$item
+    } else {
+        $path = [string]$item.path
+        $shaProp = $item.PSObject.Properties['sha256']
+        $targetProp = $item.PSObject.Properties['target']
+        if ($shaProp -and -not [string]::IsNullOrWhiteSpace([string]$shaProp.Value)) {
+            $sha = ([string]$shaProp.Value).ToLowerInvariant()
+        }
+        if ($targetProp -and -not [string]::IsNullOrWhiteSpace([string]$targetProp.Value)) {
+            $target = [string]$targetProp.Value
+        }
+        if ([string]::IsNullOrWhiteSpace($sha) -or [string]::IsNullOrWhiteSpace($target)) {
+            $sha = ''
+            $target = ''
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+    return @{ path = $path; sha256 = $sha; target = $target }
+}
+
 function Get-ManifestFingerprint($manifest) {
     $lines = New-Object System.Collections.Generic.List[string]
     [void]$lines.Add('v1')
@@ -1085,18 +1276,25 @@ function Get-ManifestFingerprint($manifest) {
     }
     $shortcuts = @()
     if ($null -ne $manifest.shortcuts) { $shortcuts = @($manifest.shortcuts) }
-    if ($shortcuts.Count -gt 1) {
-        for ($i = 0; $i -lt $shortcuts.Count; $i++) {
-            for ($j = $i + 1; $j -lt $shortcuts.Count; $j++) {
-                if ([StringComparer]::Ordinal.Compare([string]$shortcuts[$j], [string]$shortcuts[$i]) -lt 0) {
-                    $swap = $shortcuts[$i]; $shortcuts[$i] = $shortcuts[$j]; $shortcuts[$j] = $swap
+    $shortcutRecords = New-Object System.Collections.Generic.List[object]
+    foreach ($shortcut in $shortcuts) {
+        $identity = Get-ShortcutIdentity $shortcut
+        if ($null -ne $identity) { [void]$shortcutRecords.Add($identity) }
+    }
+    if ($shortcutRecords.Count -gt 1) {
+        for ($i = 0; $i -lt $shortcutRecords.Count; $i++) {
+            for ($j = $i + 1; $j -lt $shortcutRecords.Count; $j++) {
+                if ([StringComparer]::Ordinal.Compare([string]$shortcutRecords[$j].path, [string]$shortcutRecords[$i].path) -lt 0) {
+                    $swap = $shortcutRecords[$i]; $shortcutRecords[$i] = $shortcutRecords[$j]; $shortcutRecords[$j] = $swap
                 }
             }
         }
     }
-    foreach ($shortcut in $shortcuts) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$shortcut)) {
-            [void]$lines.Add('S' + "`t" + [string]$shortcut)
+    foreach ($identity in $shortcutRecords) {
+        if ($identity.sha256) {
+            [void]$lines.Add('S' + "`t" + [string]$identity.path + "`t" + [string]$identity.sha256 + "`t" + [string]$identity.target)
+        } else {
+            [void]$lines.Add('S' + "`t" + [string]$identity.path)
         }
     }
     $text = [string]::Join("`n", $lines.ToArray())
@@ -1215,30 +1413,57 @@ if ($preserved -or $left.Count -gt 0) {
 
 $shell = $null
 $finalFailed = $false
+$keptModified = $false
 $recordedShortcuts = @()
 if ($null -ne $manifest.shortcuts) { $recordedShortcuts = @($manifest.shortcuts) }
-foreach ($lnkPath in $recordedShortcuts) {
-    if ([string]::IsNullOrWhiteSpace([string]$lnkPath)) { continue }
-    if (-not (Test-Path -LiteralPath $lnkPath -PathType Leaf)) { continue }
-    if (Test-Reparse $lnkPath) { $finalFailed = $true; continue }
+foreach ($item in $recordedShortcuts) {
+    $identity = Get-ShortcutIdentity $item
+    if ($null -eq $identity) { continue }
+    $lnkPath = [string]$identity.path
+    if (-not (Test-Path -LiteralPath $lnkPath)) { continue }
+    if ((Test-Reparse $lnkPath) -or -not (Test-Path -LiteralPath $lnkPath -PathType Leaf)) {
+        $finalFailed = $true
+        continue
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$identity.sha256)) {
+        Write-Host ('MANUAL CLEANUP REQUIRED: recorded shortcut has no install-time fingerprint and was kept: ' + $lnkPath)
+        continue
+    }
+    $hash = ''
+    try { $hash = (Get-FileHash -LiteralPath $lnkPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    catch { $finalFailed = $true; continue }
+    $target = ''
     try {
         if (-not $shell) { $shell = New-Object -ComObject WScript.Shell }
         $lnk = $shell.CreateShortcut($lnkPath)
-        $target = [string]$lnk.TargetPath
-        if ($target -and (Test-WithinRoot $target)) {
-            [IO.File]::Delete($lnkPath)
-            if (Test-Path -LiteralPath $lnkPath) { $finalFailed = $true }
-        } elseif ($target) {
+        $target = ([string]$lnk.TargetPath).Trim()
+    } catch { $target = '' }
+    if ($hash -ne ([string]$identity.sha256)) {
+        $keptModified = $true
+        if ($target -and -not (Test-WithinRoot $target)) {
             Write-Host ('MANUAL CLEANUP REQUIRED: recorded shortcut no longer points at this installation and was kept: ' + $lnkPath)
         } else {
-            $finalFailed = $true
+            Write-Host ('MANUAL CLEANUP REQUIRED: recorded shortcut was modified after install and was kept: ' + $lnkPath)
         }
-    } catch {
+        continue
+    }
+    if ((-not $target) -or ([StringComparer]::OrdinalIgnoreCase.Compare($target, [string]$identity.target) -ne 0)) {
         $finalFailed = $true
+        continue
+    }
+    if (Test-WithinRoot $target) {
+        try { [IO.File]::Delete($lnkPath) } catch { $finalFailed = $true; continue }
+        if (Test-Path -LiteralPath $lnkPath) { $finalFailed = $true }
+    } else {
+        Write-Host ('MANUAL CLEANUP REQUIRED: recorded shortcut no longer points at this installation and was kept: ' + $lnkPath)
     }
 }
 if ($finalFailed) {
     Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but final cleanup failed for an owned shortcut. Manifest, anchor, and uninstall scripts were kept. Retry is possible. Exit code 4.'
+    exit 4
+}
+if ($keptModified) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: a recorded shortcut was modified after install and was kept. Full cleanup was not completed. Delete or restore that shortcut manually if you want it removed. Manifest, anchor, and uninstall scripts were kept. Exit code 4.'
     exit 4
 }
 

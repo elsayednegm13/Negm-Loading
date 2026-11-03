@@ -529,6 +529,38 @@ def _make_shortcut(path, target):
         raise AssertionError(completed.stdout + completed.stderr)
 
 
+def _customize_shortcut(path):
+    env = os.environ.copy()
+    env["F01_LNK"] = path
+    completed = subprocess.run(
+        [_powershell_exe(), "-NoProfile", "-Command",
+         "$s=New-Object -ComObject WScript.Shell; "
+         "$l=$s.CreateShortcut($env:F01_LNK); "
+         "$l.Description='user-custom-description'; "
+         "$l.Arguments='--user-flag'; "
+         "$l.IconLocation='C:\\Windows\\System32\\notepad.exe,0'; "
+         "$l.Save()"],
+        env=env, capture_output=True, text=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stdout + completed.stderr)
+
+
+def _retarget_shortcut(path, target):
+    env = os.environ.copy()
+    env["F01_LNK"] = path
+    env["F01_TGT"] = target
+    completed = subprocess.run(
+        [_powershell_exe(), "-NoProfile", "-Command",
+         "$s=New-Object -ComObject WScript.Shell; "
+         "$l=$s.CreateShortcut($env:F01_LNK); "
+         "$l.TargetPath=$env:F01_TGT; $l.Save()"],
+        env=env, capture_output=True, text=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stdout + completed.stderr)
+
+
 def _lock_exclusive(path):
     import ctypes
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -669,14 +701,14 @@ class TestWindowsUninstallChain(unittest.TestCase):
             _write(outside, "do-not-touch")
             inside_lnk = os.path.join(tmp, "links", "inside.lnk")
             outside_lnk = os.path.join(tmp, "links", "outside.lnk")
+            _make_shortcut(inside_lnk, os.path.join(root, "owned.exe"))
+            _make_shortcut(outside_lnk, outside)
             key = _install_owned(
                 root,
                 {"owned.exe": b"payload"},
                 created_root=True,
                 shortcut_paths=[inside_lnk, outside_lnk],
             )
-            _make_shortcut(inside_lnk, os.path.join(root, "owned.exe"))
-            _make_shortcut(outside_lnk, outside)
             foreign = safety.make_test_anchor_key()
             _OPEN_KEYS.append(foreign)
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER, foreign) as reg:
@@ -784,8 +816,8 @@ class TestWindowsUninstallChain(unittest.TestCase):
             root = os.path.join(tmp, "Negm Lodaing Install")
             os.makedirs(root)
             link = os.path.join(tmp, "links", "owned.lnk")
-            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
             _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
             locked = _lock_exclusive(link)
             try:
                 proc = _run_uninstall_cmd(root)
@@ -814,8 +846,8 @@ class TestWindowsUninstallChain(unittest.TestCase):
             _write(user, "user-bytes-v1")
             before = _sha(user)
             link = os.path.join(tmp, "links", "owned.lnk")
-            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
             _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
             locked = _lock_exclusive(link)
             try:
                 first = _run_uninstall_cmd(root)
@@ -984,13 +1016,179 @@ class TestIntegrationOwnership(unittest.TestCase):
                     root = os.path.join(tmp, folder)
                     os.makedirs(root)
                     user = os.path.join(tmp, "user " + folder + ".txt")
+                    inside_user = os.path.join(root, "notes.txt")
                     _write(user, "keep-" + folder)
                     before = _sha(user)
-                    _install_owned(root, {"owned.exe": b"payload"})
+                    link = os.path.join(tmp, "My Links", folder + ".lnk")
+                    _make_shortcut(link, os.path.join(root, "owned.exe"))
+                    link_before = _sha(link)
+                    _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+                    _write(inside_user, "user-inside")
+                    inside_before = _sha(inside_user)
+                    blocked = _run_uninstall_cmd(root)
+                    self.assertEqual(blocked.returncode, safety.EXIT_PARTIAL, blocked.stdout + blocked.stderr)
+                    self.assertEqual(_sha(inside_user), inside_before)
+                    self.assertEqual(_sha(link), link_before)
+                    self.assertTrue(os.path.isfile(link))
+                    os.remove(inside_user)
                     proc = _run_uninstall_cmd(root)
                     self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
                     self.assertEqual(_sha(user), before)
                     self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+                    self.assertFalse(os.path.isfile(link))
+
+    def test_new_shortcut_fingerprint_is_bound_before_anchor(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "fresh.lnk")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            manifest = safety.load_manifest(root)
+            record = manifest["shortcuts"][0]
+            self.assertEqual(record["sha256"], _sha(link))
+            self.assertTrue(record["target"])
+            safety.verify_install_anchor(root, manifest, key)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertFalse(os.path.isfile(link))
+
+    def test_customized_shortcut_is_kept_and_is_not_full_success(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            outside = os.path.join(tmp, "user-note.txt")
+            _write(outside, "do-not-touch")
+            outside_hash = _sha(outside)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            _customize_shortcut(link)
+            custom_hash = _sha(link)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
+            self.assertNotIn("Exit code 0", proc.stdout or "")
+            self.assertIn("modified after install and was kept", proc.stdout or "")
+            self.assertIn("Full cleanup was not completed", proc.stdout or "")
+            self.assertEqual(_sha(link), custom_hash)
+            self.assertEqual(_sha(outside), outside_hash)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+
+    def test_shortcut_target_moved_outside_root_is_kept(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            outside = os.path.join(tmp, "elsewhere.exe")
+            _write(outside, b"other")
+            outside_hash = _sha(outside)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            _retarget_shortcut(link, outside)
+            changed = _sha(link)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
+            self.assertIn("no longer points at this installation and was kept", proc.stdout or "")
+            self.assertNotIn("Exit code 0", proc.stdout or "")
+            self.assertEqual(_sha(link), changed)
+            self.assertEqual(_sha(outside), outside_hash)
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+
+    def test_shortcut_created_after_manifest_is_not_deleted(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "later.lnk")
+            _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            before = _sha(link)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertIn("no install-time fingerprint and was kept", proc.stdout or "")
+            self.assertEqual(_sha(link), before)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+
+    def test_legacy_string_shortcut_manifest_keeps_bytes(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "legacy.lnk")
+            key = _install_owned(root, {"owned.exe": b"payload"})
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            manifest_path = os.path.join(root, safety.MANIFEST_FILENAME)
+            with open(manifest_path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            data["shortcuts"] = [os.path.abspath(link)]
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+            safety.write_install_anchor(root, key, safety.load_manifest(root))
+            before = _sha(link)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertIn("no install-time fingerprint and was kept", proc.stdout or "")
+            self.assertEqual(_sha(link), before)
+            self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
+            with self.assertRaises(OSError):
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, key)
+
+    def test_spoofed_shortcut_hash_deletes_nothing(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall.cmd chain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            before = _sha(link)
+            manifest_path = os.path.join(root, safety.MANIFEST_FILENAME)
+            with open(manifest_path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            data["shortcuts"][0]["sha256"] = "ab" * 32
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_VERIFY_FAILED, proc.stdout + proc.stderr)
+            self.assertEqual(_sha(link), before)
+            self.assertTrue(os.path.isfile(os.path.join(root, "owned.exe")))
+            self.assertTrue(os.path.isfile(manifest_path))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+
+    def test_python_uninstall_keeps_customized_shortcut(self):
+        if os.name != "nt":
+            self.skipTest("Windows shortcut ownership")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
+            _customize_shortcut(link)
+            custom_hash = _sha(link)
+            result = safety.safe_uninstall(root, anchor_key=key)
+            self.assertEqual(result["exit_code"], safety.EXIT_FINAL)
+            self.assertIn("modified after install and was kept", result["message"])
+            self.assertTrue(result["anchor_kept"])
+            self.assertEqual(_sha(link), custom_hash)
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
 
 
 def _value_exists(key, name):
