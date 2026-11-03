@@ -611,6 +611,30 @@ def _public_shortcut(record):
     return {"path": record["path"]}
 
 
+def _manifest_shortcut_record(item):
+    """Store a trusted record as-is. Hash a path only when it is newly supplied."""
+    if isinstance(item, dict):
+        return _public_shortcut(_normalize_shortcut_entry(item))
+    return _public_shortcut(describe_shortcut(item))
+
+
+def merge_previous_shortcuts(previous, new_paths):
+    """Carry shortcut identities from a verified manifest without re-hashing them."""
+    merged = []
+    seen = set()
+    for record in (previous or {}).get("shortcuts") or []:
+        merged.append(record)
+        seen.add(os.path.normcase(record["path"]))
+    for path in new_paths or []:
+        absolute = validate_shortcut_path(path if isinstance(path, str) else path.get("path"))
+        key = os.path.normcase(absolute)
+        if key in seen:
+            continue
+        merged.append(absolute)
+        seen.add(key)
+    return merged
+
+
 def _shortcut_fingerprint_lines(shortcuts):
     lines = []
     for record in sorted(shortcuts, key=lambda item: item["path"]):
@@ -679,8 +703,7 @@ def write_manifest(install_root, files, directories, app_name=DEFAULT_APP_NAME,
                   for item in files],
         "directories": [{"path": validate_relative_path(item["path"] if isinstance(item, dict) else item)}
                         for item in directories],
-        "shortcuts": [_public_shortcut(describe_shortcut(item["path"] if isinstance(item, dict) else item))
-                      for item in (shortcuts or [])],
+        "shortcuts": [_manifest_shortcut_record(item) for item in (shortcuts or [])],
     }
     dest = os.path.join(root, MANIFEST_FILENAME)
     raw = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
@@ -1289,6 +1312,13 @@ def write_uninstall_artifacts(install_root, owned_files, owned_dirs, app_name=DE
                 raise InstallSafetyError(
                     "ملف إزالة موجود بلا بيان موثوق. لن يتم استبداله: %s" % name
                 )
+    if previous is not None:
+        # The original install recorded whether it created the folder. An upgrade
+        # must not turn a shared folder into a removable root, or forget that it
+        # created one.
+        created_root = previous.get("created_root") is True
+        cmd_text = generate_uninstall_cmd(app, created_root=created_root)
+    shortcut_inputs = merge_previous_shortcuts(previous, shortcut_paths)
     owned_hashes = owned_hash_map(previous)
     backups = capture_write_snapshot(root, list(ARTIFACT_RELPATHS) + [MANIFEST_FILENAME])
     try:
@@ -1313,7 +1343,7 @@ def write_uninstall_artifacts(install_root, owned_files, owned_dirs, app_name=DE
             app_name=app,
             app_version=app_version,
             created_root=created_root,
-            shortcuts=shortcut_paths or [],
+            shortcuts=shortcut_inputs,
         )
         write_install_anchor(root, anchor_key, load_manifest(root))
     except Exception:

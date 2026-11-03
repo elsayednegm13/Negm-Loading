@@ -1428,6 +1428,148 @@ class TestReinstallPreflight(unittest.TestCase):
         self.assertFalse(os.path.exists(link))
 
 
+class TestShortcutUpgradeCarryForward(unittest.TestCase):
+    def _upgrade(self, root, key, link, created_shortcuts):
+        zpath = os.path.join(os.path.dirname(root), "next.zip")
+        with zipfile.ZipFile(zpath, "w") as archive:
+            archive.writestr("owned.exe", b"payload-v2")
+        plan = installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+        outcome = installer_engine.create_windows_shortcut(
+            os.path.join(root, "owned.exe"), link, "Negm Lodaing Download Manager",
+            os.path.join(root, "owned.exe"),
+        )
+        passed = list(created_shortcuts)
+        if outcome == "created":
+            passed.append(os.path.abspath(link))
+        safety.write_uninstall_artifacts(
+            root, plan["owned_files"], plan["owned_dirs"],
+            created_root=plan["created_root"], anchor_key=key, run_key=key + "\\Run",
+            shortcut_paths=passed,
+        )
+        return plan, outcome
+
+    def test_upgrade_keeps_original_shortcut_identity_and_created_root(self):
+        if os.name != "nt":
+            self.skipTest("Windows shortcut upgrade")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            outside = os.path.join(tmp, "outside.txt")
+            _write(outside, "outside-user")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(
+                root, {"owned.exe": b"payload-v1"}, created_root=True, shortcut_paths=[link]
+            )
+            before = safety.load_manifest(root)
+            before_link = _sha(link)
+            outside_hash = _sha(outside)
+            plan, outcome = self._upgrade(root, key, link, [])
+            after = safety.load_manifest(root)
+            self.assertEqual(outcome, "preserved")
+            self.assertFalse(plan["created_root"])
+            self.assertTrue(before["created_root"])
+            self.assertTrue(after["created_root"])
+            self.assertEqual(after["shortcuts"], before["shortcuts"])
+            self.assertEqual(_sha(link), before_link)
+            self.assertEqual(_sha(outside), outside_hash)
+            self.assertEqual(
+                safety.read_install_anchor(key)["manifest_sha256"],
+                safety.manifest_fingerprint(after),
+            )
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertFalse(os.path.isfile(link))
+            self.assertEqual(_sha(outside), outside_hash)
+
+    def test_upgrade_does_not_rehash_a_modified_shortcut(self):
+        if os.name != "nt":
+            self.skipTest("Windows shortcut upgrade")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            outside = os.path.join(tmp, "outside.txt")
+            _write(outside, "outside-user")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(root, {"owned.exe": b"payload-v1"}, shortcut_paths=[link])
+            original = safety.load_manifest(root)["shortcuts"][0]
+            _customize_shortcut(link)
+            customized = _sha(link)
+            self.assertNotEqual(customized, original["sha256"])
+            self._upgrade(root, key, link, [])
+            carried = safety.load_manifest(root)["shortcuts"][0]
+            self.assertEqual(carried["sha256"], original["sha256"])
+            self.assertEqual(carried["target"], original["target"])
+            self.assertEqual(_sha(link), customized)
+            outside_hash = _sha(outside)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
+            self.assertIn("modified after install", proc.stdout or "")
+            self.assertEqual(_sha(link), customized)
+            self.assertEqual(_sha(outside), outside_hash)
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+
+    def test_upgrade_does_not_adopt_a_foreign_shortcut(self):
+        if os.name != "nt":
+            self.skipTest("Windows shortcut upgrade")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "shared install")
+            os.makedirs(root)
+            foreign = os.path.join(tmp, "links", "foreign.lnk")
+            _make_shortcut(foreign, os.path.join(root, "owned.exe"))
+            foreign_hash = _sha(foreign)
+            key = _install_owned(root, {"owned.exe": b"payload-v1"}, created_root=False)
+            self._upgrade(root, key, foreign, [])
+            after = safety.load_manifest(root)
+            self.assertEqual(after["shortcuts"], [])
+            self.assertFalse(after["created_root"])
+            self.assertEqual(_sha(foreign), foreign_hash)
+            proc = _run_uninstall_cmd(root)
+            self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
+            self.assertEqual(_sha(foreign), foreign_hash)
+            self.assertTrue(os.path.isdir(root))
+
+    def test_upgrade_failure_restores_previous_shortcut_record(self):
+        if os.name != "nt":
+            self.skipTest("Windows shortcut upgrade")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Negm Lodaing Install")
+            os.makedirs(root)
+            link = os.path.join(tmp, "links", "owned.lnk")
+            _make_shortcut(link, os.path.join(root, "owned.exe"))
+            key = _install_owned(
+                root, {"owned.exe": b"payload-v1"}, created_root=True, shortcut_paths=[link]
+            )
+            before = safety.load_manifest(root)
+            link_hash = _sha(link)
+            zpath = os.path.join(tmp, "next.zip")
+            with zipfile.ZipFile(zpath, "w") as archive:
+                archive.writestr("owned.exe", b"payload-v2")
+            plan = installer_engine.prepare_and_copy_payload(root, zpath, anchor_key=key)
+            original = safety.write_install_anchor
+            def boom(*_args, **_kwargs):
+                raise safety.InstallSafetyError("injected anchor failure")
+            safety.write_install_anchor = boom
+            try:
+                with self.assertRaises(safety.InstallSafetyError):
+                    safety.write_uninstall_artifacts(
+                        root, plan["owned_files"], plan["owned_dirs"],
+                        created_root=plan["created_root"], anchor_key=key,
+                        run_key=key + "\\Run", shortcut_paths=[],
+                    )
+            finally:
+                safety.write_install_anchor = original
+            safety.restore_write_snapshot(plan["snapshot"])
+            restored = safety.load_manifest(root)
+            self.assertEqual(restored["shortcuts"], before["shortcuts"])
+            self.assertTrue(restored["created_root"])
+            self.assertEqual(_sha(link), link_hash)
+            with open(os.path.join(root, "owned.exe"), "rb") as handle:
+                self.assertEqual(handle.read(), b"payload-v1")
+
+
 def _value_exists(key, name):
     import winreg
     try:
