@@ -1,0 +1,75 @@
+name: F01 isolated Windows evidence (no install or release)
+
+on:
+  push:
+    branches:
+      - verification/f01-windows-evidence-20261104
+    paths:
+      - .github/workflows/f01-windows-evidence.yml
+      - .github/scripts/f01_ci_watchdog.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  f01-safety:
+    name: F01 safety + symlink test
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout verification branch without write credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned project test dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile product safety modules
+        shell: pwsh
+        run: python -m compileall -q installer_engine.py installer_safety.py test_installer_safety.py
+      - name: Execute F01 tests with real process exit code
+        shell: pwsh
+        run: python .github/scripts/f01_ci_watchdog.py safety
+      - name: Preserve safety evidence even if tests fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f01-safety-windows-evidence
+          path: |
+            f01-safety-ci.log
+            f01-safety-ci.meta.txt
+          if-no-files-found: warn
+
+  full-suite-exit:
+    name: Full suite exit and Tk thread diagnostics
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout verification branch without write credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned project test dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run suite with traceback on hang, without masking exit
+        shell: pwsh
+        run: python .github/scripts/f01_ci_watchdog.py full
+      - name: Preserve full-suite evidence even if process hangs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f01-full-suite-windows-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
