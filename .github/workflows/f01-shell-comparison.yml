@@ -1,0 +1,50 @@
+name: F01 Windows PowerShell shell comparison (read-only CI)
+
+on:
+  push:
+    branches:
+      - verification/f01-windows-evidence-20261104
+    paths:
+      - .github/workflows/f01-shell-comparison.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  safety-from-cmd:
+    name: Compare cmd-launched F01 safe uninstall tests
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies from CMD
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Probe Windows PowerShell module loading from CMD
+        shell: cmd
+        continue-on-error: true
+        run: |
+          powershell.exe -NoProfile -NonInteractive -Command "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Get-Command Get-Acl; Write-Host CMD_LAUNCH_SECURITY_MODULE_OK"
+      - name: Probe Windows PowerShell module loading from pwsh
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Get-Command Get-Acl; Write-Host PWSH_LAUNCH_SECURITY_MODULE_OK"
+      - name: Execute unchanged F01 safety suite from CMD
+        shell: cmd
+        run: python .github/scripts/f01_ci_watchdog.py safety
+      - name: Retain actual Windows test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f01-cmd-compare-evidence
+          path: |
+            f01-safety-ci.log
+            f01-safety-ci.meta.txt
+          if-no-files-found: warn
