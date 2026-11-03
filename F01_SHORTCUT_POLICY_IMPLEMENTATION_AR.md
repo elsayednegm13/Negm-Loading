@@ -12,7 +12,8 @@
 | طلب السحب | لا طلب مفتوح قبل هذا الالتزام |
 | المقارنة | https://github.com/elsayednegm13/Negm-Loading/compare/main...fix/f01-safe-uninstall |
 | الجهاز | Windows 10 Home 26H2، البناء 26300، Python 3.13.16 |
-| SHA التنفيذ | يُذكر في عنوان الالتزام على الفرع بعد الدفع؛ الشيفرة المفحوصة هي فرق هذا الملف عن `01521c4` |
+| SHA التنفيذ | `c3187ccf02667d7bc53b077d1705f6e681ab7d9d` |
+| الرابط | https://github.com/elsayednegm13/Negm-Loading/commit/c3187ccf02667d7bc53b077d1705f6e681ab7d9d |
 
 ## سبب التعديل
 
