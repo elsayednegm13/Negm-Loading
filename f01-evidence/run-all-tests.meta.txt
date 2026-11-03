@@ -1,0 +1,6 @@
+LOG_COMPLETE=yes
+RUNNER_RESULT=OK (skipped=1)
+TESTS=76
+ELAPSED_REPORTED_BY_RUNNER_SEC=51.091
+WRAPPER_EXIT=NOT CAPTURED
+NOTE=python.exe run_all_tests.py printed the success banner and then stayed alive. It was stopped with Stop-Process after the log file already contained the final SUCCESS block. Do not treat a missing wrapper exit code as a test failure, and do not treat the stop as a second passing run.

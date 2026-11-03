@@ -1,0 +1,5 @@
+LOG_SHOWS_SUCCESS=yes
+RUNNER_TEXT=OK (skipped=1); 81 tests; 55.362 seconds
+WRAPPER_EXIT=-1
+ELAPSED_SEC=89.95
+WHY=python.exe printed the SUCCESS banner and did not return. Stop-Process was used. The wrapper then recorded EXIT=-1. That code is the stop, not an assertion failure. Tk teardown is outside F-01; ui_*.py was not changed. Do not treat this run as a process exit code of 0.

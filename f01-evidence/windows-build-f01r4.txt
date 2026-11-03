@@ -1,0 +1,11 @@
+BUILD_EXIT=0
+ELAPSED_SEC=33.58
+EXE=C:\Users\NEGM\AppData\Local\Temp\negm-f01r4-setup-build\dist\NegmLoading-Setup.exe
+SIZE_BYTES=19814554
+SHA256=babf2af3d61273c379de460215ec6bacdef0e8d4183a784177a799618163ffc8
+PYINSTALLER=6.22.3 from the repository .venv
+SOURCE_HEAD=2e0e06a1aa883cfce669186ca653d6904f995c6e
+PAYLOAD=synthetic payload.zip in the temp directory only. Not dist\NegmLoading.exe and not committed.
+LAUNCH=NOT TESTED
+SANDBOX=WindowsSandbox.exe is absent. The executable was not started.
+SYMLINK=SKIP OSError winerror 1314 ERROR_PRIVILEGE_NOT_HELD. Developer Mode was not changed.

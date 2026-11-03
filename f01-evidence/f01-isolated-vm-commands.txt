@@ -1,0 +1,12 @@
+NOT TESTED. These commands are for a Windows Sandbox or a disposable VM only.
+Do not run them on a machine that already has a real Negm Lodaing install, desktop shortcut, or production HKCU key.
+
+1. Boot a clean Windows VM. Do not enable Developer Mode and do not change the host security policy.
+2. Copy a setup built from a recorded SHA outside the repository. The build must use a synthetic payload whose members and SHA-256 values are known before launch. Record that the member name may be NegmLoading.exe while the installer writes Negm Lodaing.exe. That name mismatch is F-02 and is not a pass for this file.
+3. Create C:\F01Synthetic\outside-user.txt with contents outside-user. Record SHA-256.
+4. Create C:\F01Synthetic\preexisting.lnk pointing at C:\Windows\notepad.exe. Record SHA-256. The installer must not overwrite it.
+5. Run the setup and choose C:\F01Synthetic\Negm Lodaing Install. Do not point it at a profile folder that already contains user data.
+6. After install, record hashes of outside-user.txt, preexisting.lnk, and any file you added inside the install root that is not part of the payload.
+7. Append a line to uninstall.cmd. Run setup again as an upgrade. The expected result is refusal, with that line and the user-file hash unchanged.
+8. Restore the original uninstall.cmd from the first install only if you still have its bytes. Then run uninstall.cmd and confirm exit 0 or 4 according to shortcut policy, and that outside-user.txt is byte-for-byte unchanged.
+9. Do not treat a build that was never launched as a pass. Write the VM result, the setup SHA-256, and the user-file hashes into a new evidence file.

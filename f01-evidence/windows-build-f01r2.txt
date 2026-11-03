@@ -1,0 +1,8 @@
+BUILD_EXIT=0
+EXE=C:\Users\NEGM\AppData\Local\Temp\negm-f01r2-setup-build\dist\NegmLoading-Setup.exe
+SIZE_BYTES=19810142
+SHA256=e9179b469225380161da295b41d853129c61e38f3b4905759f40da8b95421620
+PYINSTALLER=6.22.3 from the repository .venv
+PAYLOAD=synthetic payload.zip created only in the temp build directory. It is not dist\NegmLoading.exe and it was not committed.
+GUI_AND_SANDBOX=NOT TESTED
+REASON=WindowsSandbox.exe is absent. Checking the optional feature Containers-DisposableClientVM required elevation and was not run. No VM was available. The built executable was not launched, because that would open the real setup wizard.

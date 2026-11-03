@@ -1,0 +1,8 @@
+BUILD_EXIT=0
+EXE=C:\Users\NEGM\AppData\Local\Temp\negm-f01r3-setup-build\dist\NegmLoading-Setup.exe
+SIZE_BYTES=19810580
+SHA256=301672efb4815fde031a3ecf6c5d5a9f5d04e8f55af1c7d4c488705d36ef4e84
+PYINSTALLER=6.22.3 from the repository .venv
+PAYLOAD=synthetic payload.zip in the temp build directory only
+SANDBOX_OR_VM=NOT TESTED
+REASON=WindowsSandbox.exe is absent and no VM was available. The executable was not launched.

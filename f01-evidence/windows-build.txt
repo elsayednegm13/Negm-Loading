@@ -1,0 +1,12 @@
+BUILD_EXIT=0
+ELAPSED_SEC=27.14
+EXE=C:\Users\NEGM\AppData\Local\Temp\negm-f01-setup-build\dist\NegmLoading-Setup.exe
+SIZE_BYTES=19809972
+SHA256=fd1e74de939492ddcbaf45ccc1bbdbc144fd26316feeaa5ede3a7edb46a2eb8e
+PYINSTALLER=6.22.3 (.venv)
+PYTHON=.venv Python that imports customtkinter 6.0.0
+SPEC_COPY=NegmLoading-Setup.spec copied unchanged into the temp directory
+PAYLOAD=synthetic payload.zip created only in the temp directory; contains a dummy NegmLoading.exe member, not dist\NegmLoading.exe and not a committed payload.zip
+BUNDLED=installer_safety.py is listed in build\NegmLoading-Setup\PYZ-00.toc and Analysis-00.toc
+GUI_INSTALL=NOT RUN. Launching NegmLoading-Setup.exe would open the real setup wizard and could write a per-user install plus HKCU uninstall values.
+SANDBOX=NOT USED. The build ran on the developer Windows host, with outputs kept outside the repository.
