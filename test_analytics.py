@@ -85,6 +85,33 @@ class TestAnalyticsEngine(unittest.TestCase):
         self.mgr.clear_history()
         self.assertEqual(len(self.mgr.get_records()), 0)
 
+    def test_record_ids_stay_unique_at_same_clock_tick(self):
+        # Timestamp-derived IDs previously collided within a millisecond.
+        first = DummyTask("same_tick_one.mp4", "https://example.org/one", 100)
+        second = DummyTask("same_tick_two.mp4", "https://example.org/two", 200)
+        with patch.object(E.time, "time", return_value=1_700_000_000.123):
+            r1 = self.mgr.record_download(first, "completed")
+            r2 = self.mgr.record_download(second, "completed")
+        self.assertNotEqual(r1["id"], r2["id"])
+        self.assertEqual(len(self.mgr.get_records()), 2)
+        self.assertTrue(self.mgr.delete_record(r1["id"]))
+        remaining = self.mgr.get_records()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["id"], r2["id"])
+
+    def test_delete_preserves_other_legacy_colliding_record(self):
+        first = self.mgr.record_download(
+            DummyTask("old_first.mp4", "https://example.org/one"), "completed"
+        )
+        second = self.mgr.record_download(
+            DummyTask("old_second.mp4", "https://example.org/two"), "completed"
+        )
+        second["id"] = first["id"]  # Simulate duplicate IDs already on disk.
+        self.assertTrue(self.mgr.delete_record(first["id"]))
+        remaining = self.mgr.get_records()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["filename"], "old_first.mp4")
+
     def test_summary_and_kpis(self):
         t1 = DummyTask("clip1.mp4", "https://vimeo.com/video1", 10000000)
         t2 = DummyTask("clip2.mp4", "https://vimeo.com/video2", 15000000)
