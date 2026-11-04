@@ -1570,6 +1570,74 @@ class TestShortcutUpgradeCarryForward(unittest.TestCase):
                 self.assertEqual(handle.read(), b"payload-v1")
 
 
+
+class TestF02ExecutableFilenameContract(unittest.TestCase):
+    """The binary filename is not the legacy display name or HKCU identity."""
+
+    def test_filename_and_legacy_registry_identity_are_independent(self):
+        self.assertEqual(installer_engine.APP_EXE_FILENAME, "NegmLoading.exe")
+        self.assertEqual(installer_engine.APP_NAME, safety.DEFAULT_APP_NAME)
+        self.assertEqual(installer_engine.APP_NAME, "Negm Lodaing")
+        self.assertEqual(
+            os.path.basename(installer_engine.installed_executable_path("dummy")),
+            installer_engine.APP_EXE_FILENAME,
+        )
+
+    def test_preflight_rejects_legacy_named_and_missing_payload_before_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "new install")
+            wrong_zip = os.path.join(tmp, "old-name-only.zip")
+            with zipfile.ZipFile(wrong_zip, "w") as zf:
+                zf.writestr("Negm Lodaing.exe", b"dummy legacy binary")
+                zf.writestr("assets/negm.ico", b"ico")
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.validate_setup_payload(wrong_zip)
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.validate_setup_payload(os.path.join(tmp, "missing.zip"))
+            self.assertFalse(os.path.lexists(root))
+
+            correct_zip = os.path.join(tmp, "correct.zip")
+            with zipfile.ZipFile(correct_zip, "w") as zf:
+                zf.writestr(installer_engine.APP_EXE_FILENAME, b"MZexample")
+            installer_engine.validate_setup_payload(correct_zip)
+            self.assertFalse(os.path.lexists(root))
+
+    def test_missing_or_unowned_executable_cannot_be_integrated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = installer_engine.installed_executable_path(tmp)
+            wrong = os.path.join(tmp, "Negm Lodaing.exe")
+            _write(wrong, b"legacy owned by another install")
+            plan = {"dest": tmp, "owned_files": [{"path": "other.dat"}]}
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.require_installed_executable(plan)
+            _write(target, b"MZfake")
+            # A foreign file with the right name is not sufficient proof of ownership.
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.require_installed_executable(plan)
+            plan["owned_files"].append({"path": installer_engine.APP_EXE_FILENAME})
+            self.assertEqual(installer_engine.require_installed_executable(plan), target)
+            os.remove(target)
+            with self.assertRaises(safety.InstallSafetyError):
+                installer_engine.require_installed_executable(plan)
+            self.assertEqual(open(wrong, "rb").read(), b"legacy owned by another install")
+
+    def test_worker_preflights_before_write_and_checks_executable_before_shortcuts(self):
+        import inspect
+        worker_source = inspect.getsource(installer_engine.SetupWizard._run_install_worker)
+        self.assertLess(
+            worker_source.index("validate_setup_payload("),
+            worker_source.index("prepare_and_copy_payload("),
+        )
+        self.assertLess(
+            worker_source.index("require_installed_executable("),
+            worker_source.index("create_windows_shortcut("),
+        )
+        self.assertLess(
+            worker_source.index("require_installed_executable("),
+            worker_source.index("write_safe_uninstaller("),
+        )
+
+
 def _value_exists(key, name):
     import winreg
     try:
