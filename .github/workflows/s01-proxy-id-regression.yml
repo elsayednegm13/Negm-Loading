@@ -1,0 +1,38 @@
+name: S01 proxy ID collision regression (isolated Windows)
+
+on:
+  push:
+    branches:
+      - fix/s01-proxy-id-collision
+    paths:
+      - .github/workflows/s01-proxy-id-regression.yml
+      - nexus_engine.py
+      - test_proxy_vault.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-proxy-identity:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned project dependencies
+        shell: cmd
+        run: python -m pip install -r requirements.txt --disable-pip-version-check
+      - name: Compile source and tests
+        shell: cmd
+        run: python -m compileall -q nexus_engine.py test_proxy_vault.py
+      - name: Test frozen-clock ID collision and deletion
+        shell: cmd
+        run: python -u -m unittest -v test_proxy_vault.TestProxyManager.test_distinct_ids_even_when_clock_is_frozen
+      - name: Test all proxy and credential cases
+        shell: cmd
+        run: python -u -m unittest -v test_proxy_vault
