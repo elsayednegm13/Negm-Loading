@@ -9,6 +9,7 @@ on:
       - test_analytics.py
       - test_proxy_vault.py
       - test_web_remote.py
+      - test_link_recovery.py
   workflow_dispatch:
 
 permissions:
