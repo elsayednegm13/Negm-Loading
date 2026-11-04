@@ -12,7 +12,7 @@
 
 - المصدر: `verification/f04-packaged-gui-launch-20261104`، التزام تشغيل `562403e5a86988a4d799871e2a06d84bd274424c`.
 - تشغيل `Windows Server 2022` الفعلي: [GitHub Actions #41907102127](https://github.com/elsayednegm13/Negm-Loading/actions/runs/41907102127).
-- [ملفات نتيجة JSON](https://github.com/elsayednegm13/Negm-Loading/actions/runs/41907102127/artifacts/13361672770) **إن توفر هذا الرقم في سجل Artifact**؛ يظل رابط تشغيل GitHub هو المرجع الأساسي.
+- [ملفات نتيجة JSON المحفوظة](https://github.com/elsayednegm13/Negm-Loading/actions/runs/41907102127/artifacts/13360662247)، معرّف Artifact المؤكد من تشغيل GitHub.
 - التبعيات: `Python 3.13.17` و`PyInstaller` المقيّد في `requirements.txt`.
 - أُعيد بناء `NegmLoading.exe` و`NegmLoading-Setup.exe` من الشيفرة نفسها، ثم أُعيد إنشاء `payload.zip` من الملف التنفيذي الجديد؛ لم يُستخدم `dist/` التاريخي بوصفه مصدرًا.
 
