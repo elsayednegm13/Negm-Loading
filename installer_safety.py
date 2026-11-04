@@ -1783,15 +1783,6 @@ if ($FromCmd) {
     Write-Host 'MANUAL CLEANUP REQUIRED: CMD compatibility launcher cannot self-remove safely. Use the registered PowerShell uninstaller. Exit code 4.'
     exit 4
 }
-try { [IO.File]::Delete($cmdPath) } catch {
-    Write-Host 'MANUAL CLEANUP REQUIRED: owned uninstall.cmd is locked. Recovery retained. Exit code 4.'
-    exit 4
-}
-if (Test-Path -LiteralPath $cmdPath) {
-    Write-Host 'MANUAL CLEANUP REQUIRED: uninstall.cmd remains after deletion. Recovery retained. Exit code 4.'
-    exit 4
-}
-
 $retiring = $ManifestPath + '.retiring-' + [guid]::NewGuid().ToString('N')
 $movedManifest = $false
 if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
@@ -1855,6 +1846,16 @@ if ($manifest.created_root -eq $true) {
         Write-Host 'MANUAL CLEANUP REQUIRED: payload was removed but the install folder still holds files. Exit code 4.'
         exit 4
     }
+}
+# Do not remove the CMD compatibility helper until the anchor was retired.
+# A denied registry deletion must keep BOTH manifest and CMD for retry.
+try { [IO.File]::Delete($cmdPath) } catch {
+    Write-Host 'MANUAL CLEANUP REQUIRED: owned uninstall.cmd could not be deleted after anchor retirement. Exit code 4.'
+    exit 4
+}
+if (Test-Path -LiteralPath $cmdPath) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: uninstall.cmd remains after final cleanup. Exit code 4.'
+    exit 4
 }
 $helperPath = Join-Path $Root $HelperName
 try { if (Test-Path -LiteralPath $helperPath) { [IO.File]::Delete($helperPath) } } catch {}
