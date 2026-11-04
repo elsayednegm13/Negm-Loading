@@ -1278,7 +1278,7 @@ rem Exit 2: verification failed. No files, shortcuts, or registry values were re
 rem Exit 3: payload removal incomplete. Manifest, scripts, shortcuts, and the anchor were kept.\r
 rem Exit 4: payload was removed but final cleanup could not be verified.\r
 if not exist \"%~dp0__PS1__\" goto MissingHelper\r
-\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0__PS1__\"\r
+\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0__PS1__\" -FromCmd\r
 set \"EC=%ERRORLEVEL%\"\r
 if \"%EC%\"==\"0\" goto Announce\r
 if \"%EC%\"==\"4\" goto FinalReported\r
@@ -1387,6 +1387,7 @@ _POWERSHELL_TEMPLATE = r"""# NegmLoading safe uninstaller. Do not recursively de
 # Exit 0: owned payload removed and no unrelated files remain.
 # Exit 2: verification failed. Nothing was deleted. Recovery files kept.
 # Exit 3: removal incomplete. Manifest and uninstall scripts kept. Shortcuts and registry anchor kept.
+param([switch]$FromCmd)
 $ErrorActionPreference = 'Continue'
 $Root = $PSScriptRoot
 $ManifestName = 'negmloading-install-manifest.json'
@@ -1754,6 +1755,43 @@ if ((Test-Path -LiteralPath $ManifestPath -PathType Leaf) -and -not (Test-Repars
         exit 4
     }
 }
+# This PowerShell process is the standalone Windows UninstallString target.
+# The CMD compatibility shim cannot delete itself safely while running:
+# fail with recoverable 4, leaving manifest and registry bound for retry.
+# Before cleanup validate the exact installed CMD against its manifest hash.
+$cmdPath = Join-Path $Root $CmdName
+$cmdEntries = @($manifest.files | Where-Object {
+    [StringComparer]::OrdinalIgnoreCase.Compare([string]$_.path, $CmdName) -eq 0
+})
+if ($cmdEntries.Count -ne 1 -or -not (Test-Path -LiteralPath $cmdPath -PathType Leaf) -or (Test-Reparse $cmdPath)) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: missing, ambiguous or unsafe uninstall.cmd. Recovery retained. Exit code 4.'
+    exit 4
+}
+try {
+    $cmdIdentity = $cmdEntries[0]
+    $currentCmdHash = (Get-FileHash -LiteralPath $cmdPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $currentCmdSize = (Get-Item -LiteralPath $cmdPath -Force).Length
+    if ($currentCmdHash -ne ([string]$cmdIdentity.sha256).ToLowerInvariant() -or
+        $currentCmdSize -ne [int64]$cmdIdentity.size) {
+        throw 'uninstall.cmd content no longer matches the manifest'
+    }
+} catch {
+    Write-Host 'MANUAL CLEANUP REQUIRED: uninstall.cmd ownership verification failed. Recovery retained. Exit code 4.'
+    exit 4
+}
+if ($FromCmd) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: CMD compatibility launcher cannot self-remove safely. Use the registered PowerShell uninstaller. Exit code 4.'
+    exit 4
+}
+try { [IO.File]::Delete($cmdPath) } catch {
+    Write-Host 'MANUAL CLEANUP REQUIRED: owned uninstall.cmd is locked. Recovery retained. Exit code 4.'
+    exit 4
+}
+if (Test-Path -LiteralPath $cmdPath) {
+    Write-Host 'MANUAL CLEANUP REQUIRED: uninstall.cmd remains after deletion. Recovery retained. Exit code 4.'
+    exit 4
+}
+
 $retiring = $ManifestPath + '.retiring-' + [guid]::NewGuid().ToString('N')
 $movedManifest = $false
 if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
@@ -1825,6 +1863,24 @@ if (Test-Path -LiteralPath $helperPath) {
     exit 4
 }
 
-Write-Host ($AppName + ' owned files were removed. Exit code 0.')
+# Finish only if the original installer owned the directory and it is empty.
+# Directory.Delete without recursive mode refuses any user or foreign files.
+if ($manifest.created_root -eq $true) {
+    try {
+        $safeWorkingDirectory = [IO.Path]::GetTempPath()
+        if (Test-WithinRoot $safeWorkingDirectory) { throw 'TEMP is inside install root' }
+        Set-Location -LiteralPath $safeWorkingDirectory -ErrorAction Stop
+        if (Test-Reparse $Root) { throw 'install root is a reparse point' }
+        [IO.Directory]::Delete($Root)
+    } catch {
+        Write-Host 'MANUAL CLEANUP REQUIRED: owned root could not be removed as an empty directory. Exit code 4.'
+        exit 4
+    }
+    if (Test-Path -LiteralPath $Root) {
+        Write-Host 'MANUAL CLEANUP REQUIRED: install root still exists. Exit code 4.'
+        exit 4
+    }
+}
+Write-Host ($AppName + ' owned files and expected directory were removed. Exit code 0.')
 exit 0
 """
