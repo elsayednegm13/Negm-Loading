@@ -1,0 +1,66 @@
+name: S01 combined fixes Windows regression
+
+on:
+  push:
+    branches:
+      - integration/s01-palette-proxy-verified
+    paths:
+      - .github/workflows/s01-integration-regression.yml
+      - nexus_engine.py
+      - nexus_stream_manager.py
+      - test_proxy_vault.py
+      - test_regression.py
+      - .github/scripts/s01_ci_watchdog.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targeted:
+    name: Palette and proxy regression on Windows
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install locked project requirements
+        shell: cmd
+        run: python -m pip install -r requirements.txt --disable-pip-version-check
+      - name: Compile source and regression tests
+        shell: cmd
+        run: python -m compileall -q nexus_engine.py nexus_stream_manager.py test_regression.py test_proxy_vault.py
+      - name: Run both previously failing test groups
+        shell: cmd
+        run: python -u -m unittest -v test_regression test_proxy_vault
+
+  all-tests:
+    name: Full S01 baseline suite with actual exit
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install locked project requirements
+        shell: cmd
+        run: python -m pip install -r requirements.txt --disable-pip-version-check
+      - name: Full suite with timeout tracking
+        shell: cmd
+        run: python .github/scripts/s01_ci_watchdog.py full
+      - name: Preserve raw full-suite evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-combined-verified-run
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
