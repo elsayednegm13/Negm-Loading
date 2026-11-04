@@ -141,6 +141,12 @@ def prepare_and_copy_payload(dest, payload_zip_path=None, *, startup=False, anch
     )
     target_exe = installed_executable_path(dest)
     if sys.platform == "win32":
+        # A directory with no verified manifest cannot claim an old HKCU
+        # registration merely because it matches InstallLocation.
+        if manifest is None:
+            installer_safety.assert_no_existing_uninstall_registration(
+                anchor_key or installer_safety.DEFAULT_UNINSTALL_KEY
+            )
         installer_safety.assert_uninstall_key_available(
             anchor_key or installer_safety.DEFAULT_UNINSTALL_KEY, dest
         )
