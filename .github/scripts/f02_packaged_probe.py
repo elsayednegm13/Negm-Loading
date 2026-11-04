@@ -19,6 +19,9 @@ import traceback
 import zipfile
 
 REPORT_PATH = Path("f02-packaged-build-evidence.json")
+# Executing a script under .github/scripts changes sys.path[0]; load project modules
+# from the checked-out source root rather than from the CI helper directory.
+sys.path.insert(0, str(Path.cwd()))
 
 
 def sha256(data: bytes) -> str:
