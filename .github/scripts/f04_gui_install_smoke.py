@@ -333,39 +333,94 @@ def run():
                 subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                                check=False, capture_output=True, timeout=15)
                 data["killed_only_test_process"] = True
-        # Keep unverified data untouched. Verified temporary roots can be
-        # cleaned using only the new manifest-bound safe_uninstall routine.
-        if safe_owned and install is not None and profile is not None:
+        # IMPORTANT: This diagnostic intentionally invokes ONLY the NEW
+        # uninstall.cmd generated and fingerprinted by this same verified GUI
+        # installation. Never invoke the legacy main-branch uninstaller.
+        if (safe_owned and install is not None and profile is not None
+                and data.get("result") == "PASS_F04_VM03_VM04_VM06_GUI_FRESH_AND_UPGRADE"):
             try:
-                if str(install.resolve()).lower().startswith(str(profile.resolve()).lower() + os.sep.lower()):
-                    note = install / "f04-owned-by-test-user-note.txt"
-                    if note.exists():
-                        # A real user-owned extra file must cause partial removal,
-                        # with manifest/anchor retained so cleanup is recoverable.
-                        partial = safety.safe_uninstall(str(install), anchor_key=safety.DEFAULT_UNINSTALL_KEY)
-                        data["backend_first_uninstall_exit"] = partial["exit_code"]
-                        data["backend_preserved_user_note"] = (
-                            note.is_file() and note.read_bytes() ==
-                            b"F04 TEST USER FILE - PRESERVE THROUGH UPGRADE AND PARTIAL UNINSTALL"
-                        )
-                        data["backend_retained_recovery_manifest"] = (
-                            (install / safety.MANIFEST_FILENAME).is_file()
-                        )
-                        if partial["exit_code"] != safety.EXIT_PARTIAL or not (
-                            data["backend_preserved_user_note"] and data["backend_retained_recovery_manifest"]
-                        ):
-                            data["result"] = "FAIL_PARTIAL_UNINSTALL_OWNERSHIP"
-                        else:
-                            # Delete only the known, exactly matched CI-made test note.
-                            note.unlink()
-                    cleanup = safety.safe_uninstall(str(install), anchor_key=safety.DEFAULT_UNINSTALL_KEY)
-                    data["backend_cleanup_exit"] = cleanup["exit_code"]
-                    data["backend_cleanup_root_removed"] = bool(cleanup.get("root_removed"))
-                    if cleanup["exit_code"] != safety.EXIT_OK and data.get("result", "").startswith("PASS"):
-                        data["result"] = "FAIL_VERIFIED_BACKEND_CLEANUP"
+                root_ok = str(install.resolve()).lower().startswith(
+                    str(profile.resolve()).lower() + os.sep.lower()
+                )
+                if not root_ok:
+                    raise RuntimeError("Uninstaller root is not inside the disposable profile")
+                manifest = safety.load_manifest(str(install), expected_app_name=engine.APP_NAME)
+                safety.verify_install_anchor(str(install), manifest, safety.DEFAULT_UNINSTALL_KEY)
+                owned = {x["path"].lower(): x["sha256"].lower()
+                         for x in manifest["files"]}
+                cmd = install / safety.UNINSTALL_CMD_FILENAME
+                ps1 = install / safety.UNINSTALL_PS1_FILENAME
+                for path in (cmd, ps1):
+                    if (not path.is_file() or safety.is_reparse_point(str(path))
+                            or digest(path).lower() != owned.get(path.name.lower())):
+                        raise RuntimeError("Missing/modified/non-owned NEW uninstaller helper")
+                # Compare the CMD helper with the exact source-generated code,
+                # not merely the file name or location.
+                expected = safety.generate_uninstall_cmd(engine.APP_NAME,
+                    created_root=manifest["created_root"]).encode("ascii")
+                if cmd.read_bytes() != expected:
+                    raise RuntimeError("Installed CMD is not the new audited helper")
+                helper_text = ps1.read_bytes().decode("utf-8-sig")
+                if not helper_text.startswith("# NegmLoading safe uninstaller."):
+                    raise RuntimeError("Installed PS1 is not the new safe helper")
+                if (safety.script_contains_forbidden_deletion(helper_text)
+                        or safety.script_contains_forbidden_deletion(expected.decode("ascii"))):
+                    raise RuntimeError("Unsafe deletion pattern in generated uninstaller")
+                if os.path.normcase(os.path.normpath(
+                        registry_value(safety.DEFAULT_UNINSTALL_KEY, "InstallLocation")
+                )) != os.path.normcase(os.path.normpath(str(install))):
+                    raise RuntimeError("Wrong HKCU location; refusing to run")
+                data["new_uninstaller_provenance_checked"] = True
+
+                def execute_current_helper():
+                    res = subprocess.run(
+                        ["cmd.exe", "/d", "/c", str(cmd)], cwd=str(profile),
+                        env=env, capture_output=True, text=True,
+                        timeout=90, check=False
+                    )
+                    return res.returncode, (res.stdout + "\n" + res.stderr)[-1200:]
+
+                note = install / "f04-owned-by-test-user-note.txt"
+                if not note.is_file():
+                    raise RuntimeError("Missing test user note before partial uninstall")
+                first_exit, first_log = execute_current_helper()
+                data["new_cmd_partial_exit"] = first_exit
+                data["new_cmd_partial_tail"] = first_log
+                data["new_cmd_preserved_user_note"] = (
+                    note.is_file() and note.read_bytes() ==
+                    b"F04 TEST USER FILE - PRESERVE THROUGH UPGRADE AND PARTIAL UNINSTALL"
+                )
+                data["new_cmd_recovery_manifest_kept"] = (
+                    (install / safety.MANIFEST_FILENAME).is_file()
+                )
+                data["new_cmd_anchor_kept_after_partial"] = _existing_key(
+                    safety.DEFAULT_UNINSTALL_KEY
+                )
+                if (first_exit != safety.EXIT_PARTIAL
+                        or not data["new_cmd_preserved_user_note"]
+                        or not data["new_cmd_recovery_manifest_kept"]
+                        or not data["new_cmd_anchor_kept_after_partial"]):
+                    raise RuntimeError("New CMD did not return a recoverable partial uninstall")
+                # Only the exact test-created note is removed, after proving
+                # bytes and absolute position. This never deletes real user data.
+                note.unlink()
+                final_exit, final_log = execute_current_helper()
+                data["new_cmd_final_exit"] = final_exit
+                data["new_cmd_final_tail"] = final_log
+                data["new_cmd_install_root_absent"] = not install.exists()
+                data["new_cmd_anchor_absent"] = not _existing_key(
+                    safety.DEFAULT_UNINSTALL_KEY
+                )
+                data["new_cmd_shortcuts_absent"] = all(
+                    not p.exists() for p in (desktop_lnk, start_lnk)
+                )
+                if (final_exit != safety.EXIT_OK or not data["new_cmd_install_root_absent"]
+                        or not data["new_cmd_anchor_absent"]
+                        or not data["new_cmd_shortcuts_absent"]):
+                    data["result"] = "FAIL_NEW_CMD_FINAL_CLEANUP_OR_OWNERSHIP"
             except Exception as exc:
-                data["cleanup_warning"] = repr(exc)
-                data["result"] = "FAIL_BACKEND_CLEANUP_EXCEPTION"
+                data["new_uninstaller_error"] = repr(exc)
+                data["result"] = "FAIL_NEW_CMD_RUNTIME_OR_GUARD"
         if profile is not None:
             guard = profile / "outside-sentinel.txt"
             if guard.exists():
@@ -374,10 +429,10 @@ def run():
                 )
         data["manual_vm_install_upgrade_uninstall_gate"] = "NOT_TESTED"
         if data.get("result") == "PASS_F04_VM03_VM04_VM06_GUI_FRESH_AND_UPGRADE":
-            if (data.get("backend_cleanup_exit") != safety.EXIT_OK
+            if (data.get("new_cmd_final_exit") != safety.EXIT_OK
                     or data.get("outside_sentinel_after_cleanup") is not True
                     or data.get("wizard_exit") != 0):
-                data["result"] = "FAIL_POSTINSTALL_CLEANUP_OR_EXIT"
+                data["result"] = "FAIL_NEW_CMD_CLEANUP_OR_EXIT"
         REPORT.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
         # Enforce post-install safety outcomes as part of the actual CI exit.
