@@ -275,8 +275,15 @@ def run():
                     digest(guard) == hashlib.sha256(b"F04 EXTERNAL USER FILE: DO NOT DELETE").hexdigest()
                 )
         data["manual_vm_install_upgrade_uninstall_gate"] = "NOT_TESTED"
+        if data.get("result") == "PASS_F04_VM03_VM04_GUI_FRESH_INSTALL":
+            if (data.get("backend_cleanup_exit") != safety.EXIT_OK
+                    or data.get("outside_sentinel_after_cleanup") is not True
+                    or data.get("wizard_exit") != 0):
+                data["result"] = "FAIL_POSTINSTALL_CLEANUP_OR_EXIT"
         REPORT.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
+        # Enforce post-install safety outcomes as part of the actual CI exit.
+        return 0 if data["result"] == "PASS_F04_VM03_VM04_GUI_FRESH_INSTALL" else 1
 
 
 if __name__ == "__main__":
