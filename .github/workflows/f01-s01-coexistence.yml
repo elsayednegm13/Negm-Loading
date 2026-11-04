@@ -1,0 +1,67 @@
+name: F01 + S01 combined Windows regression (isolated)
+
+on:
+  push:
+    branches:
+      - verification/f01-s01-coexistence-20261104
+    paths:
+      - .github/workflows/f01-s01-coexistence.yml
+      - .github/scripts/s01_ci_watchdog.py
+      - nexus_engine.py
+      - nexus_stream_manager.py
+      - installer_engine.py
+      - installer_safety.py
+      - test_*.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  f01-safety:
+    name: F01 safety and symlink on Windows
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install project dependencies
+        shell: cmd
+        run: python -m pip install -r requirements.txt --disable-pip-version-check
+      - name: Compile touched modules
+        shell: cmd
+        run: python -m compileall -q installer_safety.py installer_engine.py nexus_engine.py nexus_stream_manager.py test_installer_safety.py test_proxy_vault.py test_regression.py
+      - name: Run unchanged F01 security and ownership tests
+        shell: cmd
+        run: python -u -m unittest -v test_installer_safety
+
+  full-suite:
+    name: All F01 + S01 unit tests with process exit
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install project dependencies
+        shell: cmd
+        run: python -m pip install -r requirements.txt --disable-pip-version-check
+      - name: Run full suite; fail on failed assertion or hang
+        shell: cmd
+        run: python .github/scripts/s01_ci_watchdog.py full
+      - name: Upload raw full-suite exit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f01-s01-full-suite-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
