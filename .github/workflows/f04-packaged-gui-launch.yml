@@ -1,0 +1,64 @@
+name: F04 packaged setup GUI launch-close (NO INSTALL)
+
+on:
+  push:
+    branches:
+      - verification/f04-packaged-gui-launch-20261104
+    paths:
+      - .github/workflows/f04-packaged-gui-launch.yml
+      - .github/scripts/f04_packaged_gui_smoke.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packaged-gui-launch:
+    name: Fresh setup build + bounded GUI open/close, never Install
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install repository-pinned build dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Verify migration fixtures before launching packaged GUI
+        shell: cmd
+        run: python -u -m unittest -v test_legacy_migration
+      - name: Compile F04 probe
+        shell: cmd
+        run: python -m compileall -q .github/scripts/f04_packaged_gui_smoke.py
+      - name: Rebuild application from this exact commit
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading.spec
+      - name: Create payload ZIP from fresh application
+        shell: cmd
+        run: python make_installer_package.py
+      - name: Build actual packaged setup executable
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading-Setup.spec
+      - name: Recheck embedded payload and temp-only ownership lifecycle
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py
+      - name: Confirm package preflight without claiming release approval
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py --gate
+      - name: Launch real Setup.exe, observe visible wizard, close without installing
+        shell: cmd
+        run: python .github/scripts/f04_packaged_gui_smoke.py
+      - name: Preserve JSON evidence only (never release executable)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-packaged-gui-launch-evidence
+          path: |
+            f02-packaged-build-evidence.json
+            f04-packaged-gui-smoke.json
+          if-no-files-found: warn
