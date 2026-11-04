@@ -28,9 +28,10 @@ class TestNegmLoadingRegression(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls.test_root is not None:
+        try:
             cls.test_root.destroy()
-            cls.test_root = None
+        except Exception:
+            pass
 
     def test_01_ui_theme_tokens_and_cache(self):
         """Verify theme palette, font caching, and bidi engine."""
@@ -70,8 +71,7 @@ class TestNegmLoadingRegression(unittest.TestCase):
 
     def test_03_ui_components_instantiation(self):
         """Verify UI widgets instantiate properly inside a hidden CTk root."""
-        # Reuse the class Tk interpreter; do not create a second CTk root.
-        root = self.test_root
+        root = ctk.CTk()
         root.withdraw()
         try:
             # IconButton
@@ -98,18 +98,10 @@ class TestNegmLoadingRegression(unittest.TestCase):
 
             root.update_idletasks()
         finally:
-            # Release widgets, but keep the root and cached fonts for this interpreter.
-            for widget in list(root.winfo_children()):
-                widget.destroy()
+            root.destroy()
 
     def test_04_app_headless_lifecycle(self):
         """Verify full NexusStreamManagerApp starts, builds UI, and tears down cleanly."""
-        # Release the old interpreter and its cached CTkFont objects before
-        # creating the application's own CTk root and testing its dialogs.
-        if self.__class__.test_root is not None:
-            self.__class__.test_root.destroy()
-            self.__class__.test_root = None
-        theme._FONT_CACHE.clear()
         E.DEFAULT_PORT = 45798
         app = app_module.NexusStreamManagerApp()
         app.withdraw()  # keep hidden during tests
