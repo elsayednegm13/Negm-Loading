@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import unittest
+from unittest.mock import patch
 import threading
 import customtkinter as ctk
 
@@ -103,7 +104,10 @@ class TestMediaGrabberSystem(unittest.TestCase):
 
         # Test submission with custom queue
         init_tasks_count = len(self.app.tasks)
-        dlg._submit(start_now=False)
+        # The test exercises queued-task creation; a real yt-dlp binary is
+        # neither required nor safe to download in the isolated CI runner.
+        with patch("ui_dialogs.find_ytdlp_executable", return_value=r"C:\\test-bin\\yt-dlp.exe"):
+            dlg._submit(start_now=False)
         self.app.update_idletasks()
 
         self.assertEqual(len(self.app.tasks), init_tasks_count + 1)
