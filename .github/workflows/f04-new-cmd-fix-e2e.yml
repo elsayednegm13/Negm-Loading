@@ -1,0 +1,72 @@
+name: F04 new uninstall CMD finalization and EXE identity regression (isolated)
+
+on:
+  push:
+    branches:
+      - fix/f04-generated-uninstaller-finalization
+    paths:
+      - .github/workflows/f04-new-cmd-fix-e2e.yml
+      - installer_safety.py
+      - test_installer_safety.py
+      - .github/scripts/f04_gui_install_smoke.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-gui-install:
+    name: Run new verified CMD after real GUI install/upgrade; no old uninstaller
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Confirm GitHub-hosted disposable Windows runner
+        shell: cmd
+        run: |
+          if not "%RUNNER_ENVIRONMENT%"=="github-hosted" exit /b 2
+          if not "%RUNNER_OS%"=="Windows" exit /b 2
+          if "%RUNNER_TEMP%"=="" exit /b 2
+      - name: Install repository-pinned build dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Validate new CMD wrapper and all F01/F02/F04 ownership tests
+        shell: cmd
+        run: python -u -m unittest -v test_installer_safety test_legacy_migration
+      - name: Compile CI-only GUI harness without changing product code
+        shell: cmd
+        run: python -m compileall -q .github/scripts/f04_gui_install_smoke.py
+      - name: Rebuild app executable from this branch
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading.spec
+      - name: Recreate payload ZIP from fresh app
+        shell: cmd
+        run: python make_installer_package.py
+      - name: Rebuild the packaged Setup.exe from the current payload
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading-Setup.spec
+      - name: Recheck actual embedded payload and safe backend ownership
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py
+      - name: Require backend preflight to pass, not a release approval
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py --gate
+      - name: Install and upgrade via packaged GUI then invoke exact verified NEW uninstaller.cmd
+        shell: cmd
+        run: python .github/scripts/f04_gui_install_smoke.py
+      - name: Preserve verification JSON only; never upload installed app or EXEs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-fixed-cmd-real-execution-evidence
+          path: |
+            f02-packaged-build-evidence.json
+            f04-gui-fresh-install-evidence.json
+          if-no-files-found: warn
