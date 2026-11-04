@@ -1,0 +1,55 @@
+name: F02 freshly packaged Windows setup preflight (no publish)
+
+on:
+  push:
+    branches:
+      - verification/f02-packaged-setup-gate-20261104
+    paths:
+      - .github/workflows/f02-packaged-build-gate.yml
+      - .github/scripts/f02_packaged_probe.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-package-audit:
+    name: Rebuild both EXEs, inspect embedded payload, test sandboxed ownership
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Checkout locked verification commit without write credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install project build dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Build app executable from current verified source
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading.spec
+      - name: Recreate payload.zip and setup spec with the project packager
+        shell: cmd
+        run: python make_installer_package.py
+      - name: Build the real setup EXE embedding the fresh payload
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading-Setup.spec
+      - name: Inspect setup CArchive and test its exact payload in isolated temp
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py
+      - name: Upload machine-readable evidence only (never upload release binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f02-packaged-preflight-report
+          path: f02-packaged-build-evidence.json
+          if-no-files-found: warn
+      - name: Enforce F02 release NO-GO on EXE name mismatch
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py --gate
