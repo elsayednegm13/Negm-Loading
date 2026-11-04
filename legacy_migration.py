@@ -116,6 +116,27 @@ def inspect_legacy_destination(install_root: str, *, anchor_key=None) -> dict:
             report["status"] = "BLOCKED_UNTRUSTED_MANIFEST"
             return report
 
+        # An anchor binds the manifest, but does not prove the current bytes
+        # still match the file ownership recorded at install time. Only hash
+        # paths named by the verified manifest, never unrelated user files.
+        try:
+            safety.assert_no_blocking_temps(root)
+            for item in loaded["files"]:
+                owned = safety.resolve_owned_path(root, item["path"])
+                if not os.path.lexists(owned):
+                    # A missing owned file may be safely reinstalled later;
+                    # the normal payload-specific preflight remains mandatory.
+                    continue
+                if safety.is_reparse_point(owned) or not os.path.isfile(owned):
+                    report["status"] = "BLOCKED_MODIFIED_OWNED_PAYLOAD"
+                    return report
+                if safety.sha256_file(owned).lower() != item["sha256"].lower():
+                    report["status"] = "BLOCKED_MODIFIED_OWNED_PAYLOAD"
+                    return report
+        except (safety.InstallSafetyError, OSError, ValueError):
+            report["status"] = "BLOCKED_MODIFIED_OWNED_PAYLOAD"
+            return report
+
         # A verified current install is NOT safe to upgrade if its uninstall
         # script is known destructive, or cannot be reliably inspected.
         if report["legacy_uninstaller_present"] and (
