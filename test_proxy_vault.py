@@ -74,6 +74,18 @@ class TestProxyManager(unittest.TestCase):
         self.assertEqual(remaining[0]["name"], "Second")
 
 
+    def test_delete_preserves_legacy_records_with_colliding_ids(self):
+        # Existing installations may have duplicate timestamp-based IDs.
+        # A delete-by-ID must never erase every matching saved preset.
+        original = self.pm.add_proxy("Old first", "http", "127.0.0.1", 8080)
+        survivor = self.pm.add_proxy("Old second", "http", "127.0.0.2", 8081)
+        survivor["id"] = original["id"]  # Model old on-disk corruption.
+        self.assertTrue(self.pm.delete_proxy(original["id"]))
+        remaining = self.pm.get_all_proxies()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["name"], "Old second")
+
+
 class TestSiteCredentialVault(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
