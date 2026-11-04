@@ -1664,21 +1664,19 @@ class TestF04GeneratedCmdAndExeIdentity(unittest.TestCase):
         self.assertNotIn("$AppName + '.exe'", script)
         self.assertFalse(safety.script_contains_forbidden_deletion(script))
 
-    def test_finalizer_only_deletes_current_cmd_and_attempts_empty_root(self):
+    def test_uninstaller_wrapper_contains_no_unsafe_recursive_deletion(self):
+        # The batch self-deletion experiment was reverted after Windows
+        # regression tests failed: a running batch cannot reliably remove itself.
         for owns_root in (False, True):
             wrapper = safety.generate_uninstall_cmd(
                 installer_engine.APP_NAME, created_root=owns_root,
             )
             self.assertFalse(safety.script_contains_forbidden_deletion(wrapper))
-            self.assertIn('del /q "%~f0"', wrapper)
-            self.assertIn('rd "%~dp0"', wrapper)
-            self.assertIn('if exist "%~dp0." exit /b 4', wrapper)
-            self.assertNotIn("__CREATED_ROOT__", wrapper)
-            self.assertIn(
-                'set "CREATED_ROOT=%s"' % ("1" if owns_root else "0"), wrapper
-            )
+            self.assertIn("powershell.exe", wrapper.lower())
             self.assertNotIn("rd /s", wrapper.lower())
             self.assertNotIn("rmdir /s", wrapper.lower())
+            self.assertNotIn("del /q", wrapper.lower())
+            self.assertIn("EXIT", wrapper.upper())
 
 
 
