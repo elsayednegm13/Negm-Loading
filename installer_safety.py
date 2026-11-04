@@ -776,6 +776,30 @@ def _exe_from_command(value):
     return text.split(" ", 1)[0]
 
 
+def assert_no_existing_uninstall_registration(anchor_key):
+    """Fail closed if a *fresh* install would overwrite a legacy HKCU entry.
+
+    A matching InstallLocation is not ownership proof: the original installer
+    wrote that value without a bound manifest or InstallAnchor. Call this only
+    when no verified prior manifest is available.
+    """
+    _require_windows_registry()
+    import winreg
+    if not _safe_registry_key(anchor_key):
+        raise InstallSafetyError("unsafe registry key")
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, anchor_key, 0, winreg.KEY_READ):
+            pass
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise InstallSafetyError("تعذر التحقق من مفتاح تثبيت موجود؛ لن يتم استبداله.") from exc
+    raise InstallSafetyError(
+        "مفتاح تثبيت أو إزالة قديم موجود بلا بيان ملكية موثوق؛ "
+        "لن يتم تبنيه أو استبداله تلقائيًا. يلزم فحص وترحيل يدوي آمن."
+    )
+
+
 def assert_uninstall_key_available(anchor_key, install_root):
     """Refuse to replace an uninstall key that belongs to another location."""
     _require_windows_registry()
@@ -1307,6 +1331,10 @@ def write_uninstall_artifacts(install_root, owned_files, owned_dirs, app_name=DE
         verify_install_anchor(root, previous, anchor_key)
         assert_existing_writes_are_owned(root, list(ARTIFACT_RELPATHS), previous)
     else:
+        # A manifestless installation must not adopt/overwrite an old registry
+        # registration, even when InstallLocation matches this empty folder.
+        if os.name == "nt":
+            assert_no_existing_uninstall_registration(anchor_key)
         for name in ARTIFACT_RELPATHS:
             if os.path.lexists(os.path.join(root, name)):
                 raise InstallSafetyError(
