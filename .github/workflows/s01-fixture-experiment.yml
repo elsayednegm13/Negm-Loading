@@ -10,6 +10,7 @@ on:
       - test_analytics.py
       - test_proxy_vault.py
       - test_web_remote.py
+      - test_link_recovery.py
   workflow_dispatch:
 
 permissions:
@@ -27,6 +28,7 @@ jobs:
           - test_analytics
           - test_proxy_vault
           - test_web_remote
+          - test_link_recovery
           - test_queue_system
     steps:
       - uses: actions/checkout@v4
