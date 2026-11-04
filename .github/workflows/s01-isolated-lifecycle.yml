@@ -1,0 +1,53 @@
+name: S01 isolate Windows test lifecycle (no release)
+
+on:
+  push:
+    branches:
+      - diagnostics/s01-thread-lifecycle-20261104
+    paths:
+      - .github/scripts/s01_module_diagnostic.py
+      - .github/workflows/s01-isolated-lifecycle.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolate-test-modules:
+    name: Isolate ${{ matrix.module }} natural Python exit
+    runs-on: windows-2022
+    timeout-minutes: 9
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - test_regression
+          - test_media_grabber
+          - test_proxy_vault
+          - test_web_remote
+          - test_analytics
+          - test_queue_system
+    steps:
+      - name: Checkout isolated diagnostics source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Use Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run module and record live threads / actual process exit
+        shell: cmd
+        run: python .github/scripts/s01_module_diagnostic.py ${{ matrix.module }}
+      - name: Upload logs even for failures or timeouts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-${{ matrix.module }}-evidence
+          path: |
+            s01-diagnostics/${{ matrix.module }}.log
+            s01-diagnostics/${{ matrix.module }}.meta.txt
+          if-no-files-found: warn
