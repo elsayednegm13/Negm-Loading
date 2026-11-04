@@ -19,6 +19,8 @@ import traceback
 import winreg
 
 REPORT = Path("f04-packaged-gui-smoke.json")
+# Scripts under .github/scripts need an explicit repository root on sys.path.
+sys.path.insert(0, str(Path.cwd()))
 WM_CLOSE = 0x0010
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
