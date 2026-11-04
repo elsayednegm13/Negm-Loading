@@ -130,6 +130,10 @@ class TestNegmLoadingRegression(unittest.TestCase):
             app.show_command_palette()
             self.assertTrue(hasattr(app, "palette_dialog"))
             self.assertTrue(app.palette_dialog.winfo_exists())
+            self.assertIsNone(app._pending_ui_rebuild)
+            # Process later events: stale rebuild timers must not destroy the dialog.
+            app.update()
+            self.assertTrue(app.palette_dialog.winfo_exists())
             app.palette_dialog.query_var.set("video")
             app.palette_dialog._filter_commands()
             self.assertGreaterEqual(len(app.palette_dialog.rendered_items), 1)
