@@ -953,7 +953,7 @@ class TestWindowsUninstallChain(unittest.TestCase):
             )
             self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
             try:
-                proc = _run_uninstall_cmd(root)
+                proc = _run_uninstall_ps1(root)
                 self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
                 self.assertIn("retry is possible", (proc.stdout or "").lower())
                 self.assertNotIn("automatic retry cannot", (proc.stdout or "").lower())
@@ -1715,7 +1715,7 @@ class TestF04GeneratedCmdAndExeIdentity(unittest.TestCase):
     def test_generated_cmd_explicitly_marks_compatibility_invocation(self):
         cmd = safety.generate_uninstall_cmd()
         self.assertIn(" -FromCmd", cmd)
-        script = safety._powershell_uninstaller()
+        script = safety._powershell_uninstaller(safety.DEFAULT_APP_NAME)
         self.assertIn("param([switch]$FromCmd)", script)
         self.assertIn("if ($FromCmd)", script)
         self.assertIn("[IO.Directory]::Delete($Root)", script)
