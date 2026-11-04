@@ -1,0 +1,68 @@
+name: S01 media-dependency test isolation and full regression
+
+on:
+  push:
+    branches:
+      - experiments/s01-fixture-shutdown-20261104
+    paths:
+      - .github/workflows/s01-media-dependency-check.yml
+      - test_media_grabber.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targeted-media:
+    name: Media test with mocked yt-dlp presence
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Isolated media regression with process exit
+        shell: cmd
+        run: python .github/scripts/s01_module_diagnostic.py test_media_grabber
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-media-dependency-evidence
+          path: |
+            s01-diagnostics/test_media_grabber.log
+            s01-diagnostics/test_media_grabber.meta.txt
+          if-no-files-found: warn
+
+  all-tests:
+    name: Full suite after fixture and media test isolation
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Full test suite, real exit code
+        shell: cmd
+        run: python .github/scripts/f01_ci_watchdog.py full
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-all-tests-media-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
