@@ -1272,7 +1272,6 @@ def _powershell_uninstaller(app_name, anchor_key=None, run_key=None, shortcut_pa
 
 _CMD_TEMPLATE = """@echo off\r
 setlocal EnableExtensions\r
-set "CREATED_ROOT=__CREATED_ROOT__"\r
 title Removing __APP_NAME__...\r
 rem Exit 0: payload removed and final cleanup verified by PowerShell.\r
 rem Exit 2: verification failed. No files, shortcuts, or registry values were removed.\r
@@ -1289,18 +1288,7 @@ exit /b %EC%\r
 echo MANUAL CLEANUP REQUIRED: missing uninstall helper. Exit code 2.\r
 exit /b 2\r
 :Announce\r
-rem PowerShell has verified the ownership manifest and installation anchor.\r
-rem Delete only THIS wrapper and an EMPTY root originally created by setup.\r
-rem No recursive removal: leave other files untouched and return exit 4 on failure.\r
-echo __APP_NAME__ owned payload removed; finalizing wrapper cleanup.\r
-if "%CREATED_ROOT%"=="1" (\r
-    del /q "%~f0" >nul 2>&1\r
-    rd "%~dp0" >nul 2>&1\r
-    if exist "%~dp0." exit /b 4\r
-) else (\r
-    del /q "%~f0" >nul 2>&1\r
-    if exist "%~f0" exit /b 4\r
-)\r
+echo __APP_NAME__ owned files were removed.\r
 exit /b 0\r
 :FinalReported\r
 echo MANUAL CLEANUP REQUIRED: payload was removed but final cleanup is incomplete. Recovery scripts were kept. Exit code 4.\r
