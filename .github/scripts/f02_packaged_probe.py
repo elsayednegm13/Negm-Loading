@@ -46,7 +46,8 @@ def probe() -> int:
         "packaged_setup_executed": False,
         "production_registry_modified": False,
         "old_uninstaller_executed": False,
-        "release_ready": False,
+        "release_ready": False,  # GUI setup has not been executed inside a VM.
+        "preflight_passed": False,
         "tests": {},
     }
     test_key: str | None = None
@@ -96,8 +97,9 @@ def probe() -> int:
             assert any(x.startswith("browser_extension/") for x in names), "Missing browser extension"
             evidence["zip_file_count"] = len(names)
             evidence["payload_root_executable"] = app_member
-            evidence["installer_expected_executable"] = engine.APP_NAME + ".exe"
-            evidence["executable_name_match"] = app_member == engine.APP_NAME + ".exe"
+            evidence["installer_expected_executable"] = engine.APP_EXE_FILENAME
+            evidence["executable_name_match"] = app_member == engine.APP_EXE_FILENAME
+            evidence["legacy_display_identity_unchanged"] = engine.APP_NAME == safety.DEFAULT_APP_NAME
             evidence["tests"]["embedded_exe_hash_and_assets"] = "PASS"
 
         # Only a unique HKCU *test* anchor is used by the source safety engine.
@@ -113,11 +115,16 @@ def probe() -> int:
             test_key = safety.make_test_anchor_key()
             run_key = test_key + r"\Run"
 
+            # Mirrors the GUI preflight using the real embedded ZIP.
+            engine.validate_setup_payload(str(zip_path))
+            evidence["tests"]["gui_payload_executable_preflight"] = "PASS"
             p1 = engine.prepare_and_copy_payload(
                 str(install), str(zip_path), startup=False,
                 anchor_key=test_key, run_key=run_key,
             )
             assert p1["created_root"] is True
+            assert Path(engine.require_installed_executable(p1)) == install / app_member
+            evidence["tests"]["installed_executable_is_owned_and_present"] = "PASS"
             safety.write_uninstall_artifacts(
                 str(install), p1["owned_files"], p1["owned_dirs"],
                 app_name=engine.APP_NAME, created_root=p1["created_root"],
@@ -139,6 +146,7 @@ def probe() -> int:
                 app_name=engine.APP_NAME, created_root=p2["created_root"],
                 anchor_key=test_key, run_key=run_key, shortcut_paths=[],
             )
+            assert Path(engine.require_installed_executable(p2)) == install / app_member
             manifest2 = safety.load_manifest(str(install))
             safety.verify_install_anchor(str(install), manifest2, test_key)
             assert manifest2.get("created_root") is True, "Upgrade lost root ownership"
@@ -185,10 +193,15 @@ def probe() -> int:
             evidence["tests"]["uninstall_retry_and_outside_sentinel"] = "PASS"
 
         # Key mismatch is a release blocker, not a failed integrity check.
-        evidence["release_ready"] = bool(evidence["executable_name_match"]) and all(
-            x == "PASS" for x in evidence["tests"].values()
+        evidence["preflight_passed"] = bool(evidence["executable_name_match"]) and bool(
+            evidence["legacy_display_identity_unchanged"]
+        ) and all(x == "PASS" for x in evidence["tests"].values())
+        # Successful noninteractive preflight does not certify the GUI setup.
+        evidence["release_ready"] = False
+        evidence["release_gate"] = (
+            "NO-GO: interactive packaged setup/upgrade/uninstall not tested in VM"
+            if evidence["preflight_passed"] else "NO-GO: packaged backend preflight failed"
         )
-        evidence["release_gate"] = "PASS" if evidence["release_ready"] else "NO-GO: F02 executable name mismatch"
         print(json.dumps(evidence, ensure_ascii=False, indent=2), flush=True)
         return 0
     except Exception:
@@ -213,10 +226,10 @@ def gate() -> int:
         return 3
     e = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
     print(e.get("release_gate"), flush=True)
-    if not e.get("release_ready"):
+    if not e.get("preflight_passed"):
         return 2
-    # This does NOT certify GUI operation. A separate interactive VM gate remains.
-    print("STATIC/BACKEND PACKAGE PROBE PASS; INTERACTIVE VM GATE STILL REQUIRED", flush=True)
+    # A green CI job is a *backend package preflight*, never a release approval.
+    print("PACKAGE BACKEND PREFLIGHT PASS; INTERACTIVE VM RELEASE GATE REMAINS NO-GO", flush=True)
     return 0
 
 
