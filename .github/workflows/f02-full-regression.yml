@@ -1,0 +1,45 @@
+name: F02 full Windows regression after executable name repair
+
+on:
+  push:
+    branches:
+      - fix/f02-executable-contract
+    paths:
+      - .github/workflows/f02-full-regression.yml
+      - installer_engine.py
+      - test_installer_safety.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-regression:
+    name: Full F01 + S01 + F02 suite (real exit, no hang)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned requirements
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile all Python tests and source
+        shell: cmd
+        run: python -m compileall -q installer_engine.py installer_safety.py nexus_engine.py nexus_stream_manager.py test_installer_safety.py
+      - name: Run complete original suite and require process exit 0
+        shell: cmd
+        run: python .github/scripts/s01_ci_watchdog.py full
+      - name: Preserve actual exit code and logs even on failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f02-all-tests-real-exit-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
