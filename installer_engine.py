@@ -12,6 +12,9 @@ import customtkinter as ctk
 import installer_safety
 
 APP_NAME = "Negm Lodaing"
+# The on-disk executable is distinct from the historical display/registry name.
+# Do not rename APP_NAME: existing HKCU anchors and shortcuts rely on it.
+APP_EXE_FILENAME = "NegmLoading.exe"
 APP_VERSION = "1.0.0"
 APP_PUBLISHER = "Negm Lodaing Software"
 DEFAULT_INSTALL_SUBDIR = "Negm Lodaing"
@@ -39,6 +42,37 @@ def get_default_install_dir():
         return os.path.join(local_app_data, "Programs", DEFAULT_INSTALL_SUBDIR)
     prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
     return os.path.join(prog_files, DEFAULT_INSTALL_SUBDIR)
+
+def installed_executable_path(install_dir):
+    """Return the packaged executable filename; independent of display names."""
+    return os.path.join(install_dir, APP_EXE_FILENAME)
+
+
+def validate_setup_payload(payload_zip_path):
+    """Reject a missing/wrongly named executable before any install write."""
+    if not payload_zip_path or not os.path.isfile(payload_zip_path):
+        raise installer_safety.InstallSafetyError("حزمة التثبيت غير موجودة.")
+    planned, _dirs = installer_safety.list_zip_payload_paths(payload_zip_path)
+    if APP_EXE_FILENAME not in planned:
+        raise installer_safety.InstallSafetyError(
+            "الحزمة لا تحتوي على الملف التنفيذي المطلوب: " + APP_EXE_FILENAME
+        )
+
+
+def require_installed_executable(plan):
+    """Register or launch only an owned, ordinary file installed this round."""
+    target = installed_executable_path(plan["dest"])
+    if not any(
+        isinstance(item, dict) and item.get("path") == APP_EXE_FILENAME
+        for item in plan["owned_files"]
+    ):
+        raise installer_safety.InstallSafetyError("الملف التنفيذي غير مسجل ضمن الحمولة المثبتة.")
+    if not os.path.isfile(target) or installer_safety.is_reparse_point(target):
+        raise installer_safety.InstallSafetyError(
+            "الملف التنفيذي المطلوب غير موجود أو ليس ملفًا عاديًا: " + APP_EXE_FILENAME
+        )
+    return target
+
 
 def _shortcut_argument_safe(value):
     return isinstance(value, str) and value and not any(char in value for char in ('"', "\r", "\n"))
@@ -95,9 +129,9 @@ def prepare_and_copy_payload(dest, payload_zip_path=None, *, startup=False, anch
         planned, _zip_dirs = installer_safety.list_zip_payload_paths(payload_zip_path)
     else:
         planned = []
-        src_exe = os.path.join("dist", f"{APP_NAME}.exe")
+        src_exe = os.path.join("dist", APP_EXE_FILENAME)
         if os.path.exists(src_exe):
-            planned.append(f"{APP_NAME}.exe")
+            planned.append(APP_EXE_FILENAME)
         if os.path.exists("browser_extension"):
             planned.extend(installer_safety.list_tree_file_relpaths("browser_extension", "browser_extension"))
         if os.path.exists("assets"):
@@ -105,7 +139,7 @@ def prepare_and_copy_payload(dest, payload_zip_path=None, *, startup=False, anch
     dest, created_root, manifest = installer_safety.assess_destination(
         dest, planned, anchor_key=anchor_key
     )
-    target_exe = os.path.join(dest, f"{APP_NAME}.exe")
+    target_exe = installed_executable_path(dest)
     if sys.platform == "win32":
         installer_safety.assert_uninstall_key_available(
             anchor_key or installer_safety.DEFAULT_UNINSTALL_KEY, dest
@@ -126,11 +160,11 @@ def prepare_and_copy_payload(dest, payload_zip_path=None, *, startup=False, anch
                 payload_zip_path, dest, expected_by_rel=expected
             )
         else:
-            src_exe = os.path.join("dist", f"{APP_NAME}.exe")
+            src_exe = os.path.join("dist", APP_EXE_FILENAME)
             if os.path.exists(src_exe):
                 owned_files.append(installer_safety.safe_copy_file(
-                    src_exe, dest, f"{APP_NAME}.exe",
-                    expected_sha=expected.get(os.path.normcase(f"{APP_NAME}.exe")),
+                    src_exe, dest, APP_EXE_FILENAME,
+                    expected_sha=expected.get(os.path.normcase(APP_EXE_FILENAME)),
                 ))
             if os.path.exists("browser_extension"):
                 files, dirs = installer_safety.safe_copy_tree(
@@ -182,7 +216,7 @@ def register_uninstall(install_dir, uninstaller_exe):
             winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, APP_VERSION)
             winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, APP_PUBLISHER)
             winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, install_dir)
-            target_exe = os.path.join(install_dir, f"{APP_NAME}.exe")
+            target_exe = installed_executable_path(install_dir)
             if os.path.exists(target_exe):
                 winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, target_exe)
             winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstaller_exe}"')
@@ -328,6 +362,8 @@ class SetupWizard(ctk.CTk):
         committed = False
         try:
             self._set_prog(0.1, "استخراج ملفات البرنامج...")
+            # A malformed setup is refused before touching the user's directory.
+            validate_setup_payload(self.payload_zip_path)
             plan = prepare_and_copy_payload(
                 os.path.normpath(self.install_dir.get()),
                 self.payload_zip_path,
@@ -340,7 +376,7 @@ class SetupWizard(ctk.CTk):
             self._set_prog(0.7, "اكتمل استخراج الحزمة")
 
             self._set_prog(0.75, "إنشاء اختصارات سطح المكتب وقائمة ابدأ...")
-            target_exe = os.path.join(dest, f"{APP_NAME}.exe")
+            target_exe = require_installed_executable(plan)
             icon_ico = os.path.join(dest, "assets", "negm.ico")
             if not os.path.exists(icon_ico):
                 icon_ico = target_exe
@@ -434,7 +470,7 @@ class SetupWizard(ctk.CTk):
 
     def finish_install(self):
         if self.chk_launch.get():
-            target_exe = os.path.join(os.path.normpath(self.install_dir.get()), f"{APP_NAME}.exe")
+            target_exe = installed_executable_path(os.path.normpath(self.install_dir.get()))
             if os.path.exists(target_exe):
                 try:
                     subprocess.Popen([target_exe], close_fds=True, creationflags=0x00000008 if sys.platform == "win32" else 0)
