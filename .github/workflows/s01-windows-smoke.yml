@@ -1,0 +1,39 @@
+name: S01 test-only Windows verification
+
+on:
+  push:
+    branches:
+      - fix/s01-test-process-shutdown
+    paths:
+      - .github/workflows/s01-windows-smoke.yml
+      - test_analytics.py
+      - test_proxy_vault.py
+      - test_web_remote.py
+      - test_link_recovery.py
+      - test_media_grabber.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-s01-test-lifecycle:
+    name: Focused S01 UI fixtures and media queued-task test
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned requirements
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile updated test modules
+        shell: cmd
+        run: python -m compileall -q test_analytics.py test_proxy_vault.py test_web_remote.py test_link_recovery.py test_media_grabber.py
+      - name: Run all changed tests in one Python process and require natural exit 0
+        shell: cmd
+        run: python -u -m unittest -v test_analytics test_proxy_vault test_web_remote test_link_recovery test_media_grabber
