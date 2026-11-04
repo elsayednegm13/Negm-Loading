@@ -208,6 +208,24 @@ def write_safe_uninstaller(install_dir, owned_files, owned_dirs, created_root=Fa
     )
 
 
+def registry_uninstall_command(install_dir):
+    """Use a standalone PowerShell process, never a running CMD self-deletion."""
+    root = installer_safety.validate_install_root(install_dir)
+    helper = installer_safety.resolve_owned_path(root, installer_safety.UNINSTALL_PS1_FILENAME)
+    if not os.path.isfile(helper) or installer_safety.is_reparse_point(helper):
+        raise installer_safety.InstallSafetyError("مساعد الإزالة الآمن غير موجود أو غير موثوق.")
+    if any(c in helper for c in ('"', "\r", "\n")):
+        raise installer_safety.InstallSafetyError("مسار مساعد الإزالة غير صالح للتسجيل.")
+    windows_root = os.environ.get("SystemRoot", r"C:\Windows")
+    launcher = os.path.join(windows_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    if any(c in launcher for c in ('"', "\r", "\n")):
+        raise installer_safety.InstallSafetyError("مسار PowerShell غير صالح.")
+    return (
+        f'"{launcher}" -NoProfile -NonInteractive '
+        f'-ExecutionPolicy Bypass -File "{helper}"'
+    )
+
+
 def register_uninstall(install_dir, uninstaller_exe):
     if sys.platform != "win32":
         return
@@ -215,6 +233,16 @@ def register_uninstall(install_dir, uninstaller_exe):
     installer_safety.assert_uninstall_key_available(
         installer_safety.DEFAULT_UNINSTALL_KEY, install_dir
     )
+    expected_cmd = installer_safety.resolve_owned_path(
+        install_dir, installer_safety.UNINSTALL_CMD_FILENAME
+    )
+    if os.path.normcase(os.path.abspath(uninstaller_exe)) != os.path.normcase(expected_cmd):
+        raise installer_safety.InstallSafetyError("مسار مزيل الإزالة المولد لا يطابق الملف المملوك.")
+    recorded = installer_safety.load_manifest(install_dir, expected_app_name=APP_NAME)
+    installer_safety.verify_install_anchor(
+        install_dir, recorded, installer_safety.DEFAULT_UNINSTALL_KEY
+    )
+    uninstall_string = registry_uninstall_command(install_dir)
     try:
         key_path = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_NAME}"
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
@@ -225,7 +253,7 @@ def register_uninstall(install_dir, uninstaller_exe):
             target_exe = installed_executable_path(install_dir)
             if os.path.exists(target_exe):
                 winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, target_exe)
-            winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstaller_exe}"')
+            winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, uninstall_string)
             winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
             winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
     except installer_safety.InstallSafetyError:
