@@ -1,0 +1,64 @@
+name: S01 palette pending-rebuild guard Windows
+
+on:
+  push:
+    branches:
+      - fix/s01-palette-pending-rebuild
+    paths:
+      - .github/workflows/s01-palette-guard.yml
+      - .github/scripts/s01_ci_watchdog.py
+      - nexus_stream_manager.py
+      - test_regression.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Test dialog survival after language switch
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install project requirements
+        shell: cmd
+        run: python -m pip install -r requirements.txt --disable-pip-version-check
+      - name: Compile changed source and test
+        shell: cmd
+        run: python -m compileall -q nexus_stream_manager.py test_regression.py
+      - name: Run original four regression tests with new dialog-survival assertion
+        shell: cmd
+        run: python -u -m unittest -v test_regression
+
+  full-suite:
+    name: Run entire baseline suite and require natural exit
+    runs-on: windows-2022
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install project requirements
+        shell: cmd
+        run: python -m pip install -r requirements.txt --disable-pip-version-check
+      - name: Record full-suite exit status
+        shell: cmd
+        run: python .github/scripts/s01_ci_watchdog.py full
+      - name: Retain failure and timeout evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-palette-guard-full-suite
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
