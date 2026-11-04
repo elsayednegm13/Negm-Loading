@@ -145,7 +145,7 @@ def probe() -> int:
             evidence["tests"]["real_packaged_payload_upgrade"] = "PASS"
 
             # Refuse a collision before writes (no production/temp root is touched).
-            foreign_tmp = install / (safety.UNINSTALL_CMD_FILENAME + ".tmp")
+            foreign_tmp = install / (safety.MANIFEST_FILENAME + ".tmp")
             foreign_tmp.write_bytes(b"foreign temp sentinel")
             owned_before = sha256_file(install / app_member)
             did_refuse = False
