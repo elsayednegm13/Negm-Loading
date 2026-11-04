@@ -1619,7 +1619,18 @@ class TestF02ExecutableFilenameContract(unittest.TestCase):
             os.remove(target)
             with self.assertRaises(safety.InstallSafetyError):
                 installer_engine.require_installed_executable(plan)
-            self.assertEqual(open(wrong, "rb").read(), b"legacy owned by another install")
+            with open(wrong, "rb") as handle:
+                self.assertEqual(handle.read(), b"legacy owned by another install")
+
+    def test_shortcut_registry_and_launch_use_installed_filename(self):
+        import inspect
+        register = inspect.getsource(installer_engine.register_uninstall)
+        worker = inspect.getsource(installer_engine.SetupWizard._run_install_worker)
+        finish = inspect.getsource(installer_engine.SetupWizard.finish_install)
+        self.assertIn("installed_executable_path(install_dir)", register)
+        self.assertIn("require_installed_executable(plan)", worker)
+        self.assertIn("installed_executable_path(", finish)
+        self.assertNotIn('f"{APP_NAME}.exe"', register + worker + finish)
 
     def test_worker_preflights_before_write_and_checks_executable_before_shortcuts(self):
         import inspect
