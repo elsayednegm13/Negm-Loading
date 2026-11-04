@@ -9,6 +9,7 @@ import time
 
 test_modules = [
     "test_installer_safety",
+    "test_legacy_migration",
     "test_regression",
     "test_queue_system",
     "test_site_grabber",
