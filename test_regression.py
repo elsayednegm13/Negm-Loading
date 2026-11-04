@@ -122,6 +122,12 @@ class TestNegmLoadingRegression(unittest.TestCase):
             app.update_idletasks()
             self.assertEqual(app.settings.get("lang"), initial_lang)
 
+            # Diagnostic only: quick_language() schedules rebuild_ui() via
+            # after(60); update_idletasks() does not dispatch timed callbacks.
+            # Flush the pending rebuilds BEFORE creating a CTkToplevel.
+            time.sleep(0.12)
+            app.update()
+
             # Verify table can redraw
             app.table.refresh_viewport()
             app.update_idletasks()
