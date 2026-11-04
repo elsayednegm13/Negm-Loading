@@ -1,0 +1,52 @@
+name: S01 test-fixture shutdown experiment (Windows)
+
+on:
+  push:
+    branches:
+      - experiments/s01-fixture-shutdown-20261104
+    paths:
+      - .github/workflows/s01-fixture-experiment.yml
+      - .github/scripts/s01_module_diagnostic.py
+      - test_analytics.py
+      - test_proxy_vault.py
+      - test_web_remote.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixture-lifecycle:
+    name: Compare fixture shutdown for ${{ matrix.module }}
+    runs-on: windows-2022
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - test_analytics
+          - test_proxy_vault
+          - test_web_remote
+          - test_queue_system
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run isolated fixture test with real process exit
+        shell: cmd
+        run: python .github/scripts/s01_module_diagnostic.py ${{ matrix.module }}
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-experiment-${{ matrix.module }}
+          path: |
+            s01-diagnostics/${{ matrix.module }}.log
+            s01-diagnostics/${{ matrix.module }}.meta.txt
+          if-no-files-found: warn
