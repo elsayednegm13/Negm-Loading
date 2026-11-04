@@ -1,0 +1,45 @@
+name: S01 full-suite Windows lifecycle verification
+
+on:
+  push:
+    branches:
+      - experiments/s01-fixture-shutdown-20261104
+    paths:
+      - .github/workflows/s01-full-suite-lifecycle.yml
+      - test_analytics.py
+      - test_proxy_vault.py
+      - test_web_remote.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-suite-lifecycle:
+    name: Full suite natural exit after fixture teardown fix
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - name: Checkout isolated experiment
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Full suite with actual exit and hang stack dump
+        shell: cmd
+        run: python .github/scripts/f01_ci_watchdog.py full
+      - name: Upload exit and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-full-suite-lifecycle-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
