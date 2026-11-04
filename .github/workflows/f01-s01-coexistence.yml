@@ -1,4 +1,5 @@
 name: F01 + S01 combined Windows regression (isolated)
+# Final combined candidate includes history, proxy, and credential collision guards.
 
 on:
   push:
