@@ -1,0 +1,63 @@
+name: F04 PowerShell real-EXE identity correction (no new CMD self-delete)
+
+on:
+  push:
+    branches:
+      - fix/f04-generated-uninstaller-finalization
+    paths:
+      - .github/workflows/f04-uninstaller-identity-regression.yml
+      - installer_safety.py
+      - test_installer_safety.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    name: Confirm F01/F02/F03/F04 safety & unchanged batch behavior
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile patched PowerShell generator and tests
+        shell: cmd
+        run: python -m compileall -q installer_safety.py test_installer_safety.py
+      - name: Run safe ownership, legacy, and F04 exe identity regressions
+        shell: cmd
+        run: python -u -m unittest -v test_installer_safety test_legacy_migration
+
+  full:
+    name: Full suite natural process exit after real-EXE identity change
+    runs-on: windows-2022
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run complete suite with watchdog and actual exit
+        shell: cmd
+        run: python .github/scripts/s01_ci_watchdog.py full
+      - name: Preserve full suite exit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-identity-full-suite-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
