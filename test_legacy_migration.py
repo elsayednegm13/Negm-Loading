@@ -98,7 +98,7 @@ class TestF03LegacyReadOnlyAudit(unittest.TestCase):
         self.assertEqual(found["status"], "BLOCKED_NO_TRUSTED_MANIFEST")
         self.assertTrue(found["has_new_executable_name"])
         self.assertFalse(found["can_install_or_upgrade"])
-        self.assertEqual(_sha(old_exe), _sha(old_exe))
+        self.assertEqual(_sha(old_exe), hashlib.sha256(b"MZpossibly-foreign").hexdigest())
 
     def test_corrupt_or_mismatched_manifest_always_blocks(self):
         os.makedirs(self.root)
