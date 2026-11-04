@@ -10,6 +10,7 @@ import json
 import socket
 import tempfile
 import unittest
+from unittest.mock import patch
 import requests
 
 import nexus_engine as E
@@ -179,12 +180,15 @@ class TestPhase12Dialogs(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls.app is not None:
-            try:
-                cls.app.is_closing = True
-                cls.app.destroy()
-            except Exception:
-                pass
+        if cls.app is None:
+            return
+        # UI test fixtures must use the application lifecycle to stop the
+        # tray and browser bridge threads; direct destroy() bypasses it.
+        cls.app.force_exit = True
+        # State persistence is irrelevant to widget tests and must not leak
+        # test data into the runner's settings or task history.
+        with patch.object(cls.app, "save_state", return_value=None):
+            cls.app.on_close()
 
     def setUp(self):
         if self.app is None:
