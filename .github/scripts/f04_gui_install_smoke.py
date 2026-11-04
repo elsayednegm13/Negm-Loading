@@ -231,9 +231,86 @@ def run():
         if guard_sha != digest(guard):
             raise RuntimeError("Outside test guard changed during installation")
         data["checks"]["outside_sentinel_untouched"] = "PASS"
+        original_manifest = safety.load_manifest(str(install))
+        if original_manifest["created_root"] is not True:
+            raise RuntimeError("Fresh GUI install did not record ownership of the created root")
+        tracked_shortcuts = {os.path.normcase(entry["path"]): entry
+                             for entry in original_manifest["shortcuts"]}
+        if not all(os.path.normcase(str(p)) in tracked_shortcuts for p in (desktop_lnk, start_lnk)):
+            raise RuntimeError("GUI installation did not inventory both created shortcuts")
+        shortcut_hashes = {str(p): digest(p) for p in (desktop_lnk, start_lnk)}
+        data["checks"]["fresh_shortcuts_are_owned_in_manifest"] = "PASS"
+
+        # Close the first installer before starting an in-place GUI upgrade.
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+        current_window = matching_wizard(setup)
+        if current_window is None or not user32.PostMessageW(current_window["hwnd"], 0x0010, 0, 0):
+            raise RuntimeError("Could not close the first completed setup wizard")
+        proc.wait(timeout=20)
+        if proc.returncode != 0:
+            raise RuntimeError("First setup wizard exited with failure status")
+        data["first_wizard_exit"] = proc.returncode
+
+        # This marker is created BY THE CI TEST after installation. It must
+        # survive the upgrade and the first, deliberately partial uninstall.
+        user_note = install / "f04-owned-by-test-user-note.txt"
+        note_bytes = b"F04 TEST USER FILE - PRESERVE THROUGH UPGRADE AND PARTIAL UNINSTALL"
+        user_note.write_bytes(note_bytes)
+        manifest_path = install / safety.MANIFEST_FILENAME
+        manifest_previous_mtime = manifest_path.stat().st_mtime_ns
+        data["upgrade_started_with_foreign_user_file"] = True
+
+        proc = subprocess.Popen([str(setup)], cwd=str(setup.parent), env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        upgrade_window = wait_wizard(setup, proc)
+        data["upgrade_next_click"] = click_next(upgrade_window)
+        time.sleep(1)
+        upgrade_window = matching_wizard(setup)
+        if upgrade_window is None:
+            raise RuntimeError("Upgrade wizard disappeared before install step")
+        data["upgrade_install_click"] = click_next(upgrade_window)
+        data["clicked_upgrade"] = True
+        deadline = time.monotonic() + 110
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError("Upgrade Setup.exe exited before commit")
+            if manifest_path.exists() and manifest_path.stat().st_mtime_ns > manifest_previous_mtime:
+                try:
+                    upgraded_manifest = safety.load_manifest(str(install))
+                    safety.verify_install_anchor(str(install), upgraded_manifest, safety.DEFAULT_UNINSTALL_KEY)
+                    break
+                except safety.InstallSafetyError:
+                    pass
+            time.sleep(1)
+        else:
+            raise RuntimeError("GUI upgrade did not update a verified manifest within deadline")
+
+        if upgraded_manifest["created_root"] is not True:
+            raise RuntimeError("Upgrade dropped original root-ownership flag")
+        if not user_note.is_file() or user_note.read_bytes() != note_bytes:
+            raise RuntimeError("User-created test file was lost or modified by upgrade")
+        if digest(dest_exe) != digest(packaged_app):
+            raise RuntimeError("Upgrade did not preserve the expected app bytes")
+        updated_shortcuts = {os.path.normcase(entry["path"]): entry
+                             for entry in upgraded_manifest["shortcuts"]}
+        if set(tracked_shortcuts) != set(updated_shortcuts):
+            raise RuntimeError("Upgrade lost or adopted shortcut inventory records")
+        for key in tracked_shortcuts:
+            if tracked_shortcuts[key] != updated_shortcuts[key]:
+                raise RuntimeError("Upgrade changed original shortcut identity metadata")
+        if any(digest(Path(p)) != h for p, h in shortcut_hashes.items()):
+            raise RuntimeError("Upgrade modified a pre-existing owned shortcut")
+        if digest(guard) != guard_sha:
+            raise RuntimeError("External user file changed during upgrade")
+        data["checks"]["gui_upgrade_preserves_root_ownership"] = "PASS"
+        data["checks"]["gui_upgrade_preserves_user_file"] = "PASS"
+        data["checks"]["gui_upgrade_preserves_shortcuts_and_fingerprints"] = "PASS"
+        data["checks"]["gui_upgrade_preserves_payload_and_external_guard"] = "PASS"
         data["install_root_rel"] = str(install.relative_to(profile))
         data["shortcuts_rel"] = [str(desktop_lnk.relative_to(profile)), str(start_lnk.relative_to(profile))]
-        data["result"] = "PASS_F04_VM03_VM04_GUI_FRESH_INSTALL"
+        data["result"] = "PASS_F04_VM03_VM04_VM06_GUI_FRESH_AND_UPGRADE"
         return 0
     except Exception as exc:
         data["result"] = "FAIL_OR_BLOCKED"
@@ -261,6 +338,26 @@ def run():
         if safe_owned and install is not None and profile is not None:
             try:
                 if str(install.resolve()).lower().startswith(str(profile.resolve()).lower() + os.sep.lower()):
+                    note = install / "f04-owned-by-test-user-note.txt"
+                    if note.exists():
+                        # A real user-owned extra file must cause partial removal,
+                        # with manifest/anchor retained so cleanup is recoverable.
+                        partial = safety.safe_uninstall(str(install), anchor_key=safety.DEFAULT_UNINSTALL_KEY)
+                        data["backend_first_uninstall_exit"] = partial["exit_code"]
+                        data["backend_preserved_user_note"] = (
+                            note.is_file() and note.read_bytes() ==
+                            b"F04 TEST USER FILE - PRESERVE THROUGH UPGRADE AND PARTIAL UNINSTALL"
+                        )
+                        data["backend_retained_recovery_manifest"] = (
+                            (install / safety.MANIFEST_FILENAME).is_file()
+                        )
+                        if partial["exit_code"] != safety.EXIT_PARTIAL or not (
+                            data["backend_preserved_user_note"] and data["backend_retained_recovery_manifest"]
+                        ):
+                            data["result"] = "FAIL_PARTIAL_UNINSTALL_OWNERSHIP"
+                        else:
+                            # Delete only the known, exactly matched CI-made test note.
+                            note.unlink()
                     cleanup = safety.safe_uninstall(str(install), anchor_key=safety.DEFAULT_UNINSTALL_KEY)
                     data["backend_cleanup_exit"] = cleanup["exit_code"]
                     data["backend_cleanup_root_removed"] = bool(cleanup.get("root_removed"))
@@ -268,6 +365,7 @@ def run():
                         data["result"] = "FAIL_VERIFIED_BACKEND_CLEANUP"
             except Exception as exc:
                 data["cleanup_warning"] = repr(exc)
+                data["result"] = "FAIL_BACKEND_CLEANUP_EXCEPTION"
         if profile is not None:
             guard = profile / "outside-sentinel.txt"
             if guard.exists():
@@ -275,7 +373,7 @@ def run():
                     digest(guard) == hashlib.sha256(b"F04 EXTERNAL USER FILE: DO NOT DELETE").hexdigest()
                 )
         data["manual_vm_install_upgrade_uninstall_gate"] = "NOT_TESTED"
-        if data.get("result") == "PASS_F04_VM03_VM04_GUI_FRESH_INSTALL":
+        if data.get("result") == "PASS_F04_VM03_VM04_VM06_GUI_FRESH_AND_UPGRADE":
             if (data.get("backend_cleanup_exit") != safety.EXIT_OK
                     or data.get("outside_sentinel_after_cleanup") is not True
                     or data.get("wizard_exit") != 0):
@@ -283,7 +381,7 @@ def run():
         REPORT.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
         # Enforce post-install safety outcomes as part of the actual CI exit.
-        return 0 if data["result"] == "PASS_F04_VM03_VM04_GUI_FRESH_INSTALL" else 1
+        return 0 if data["result"] == "PASS_F04_VM03_VM04_VM06_GUI_FRESH_AND_UPGRADE" else 1
 
 
 if __name__ == "__main__":
