@@ -23,7 +23,7 @@
 
 عند انتهاء المجموعات الثلاث المعلّقة كان `TextTestRunner` قد عاد، لكن ظل خيط غير `daemon` من `pystray._win32._mainloop`، والخيط الرئيسي ينتظر داخل `threading._shutdown`. خيوط `socketserver` المعروضة كانت `daemon` ولا يُعتبر وجودها وحده سبب منع الخروج.
 
-**السبب في مصدر الاختبارات:** `tearDownClass` ضمن `TestAnalyticsDialog` و`TestPhase11Dialogs` و`TestPhase12Dialogs` و`TestLinkRecoveryDialogs` كان يتجاوز تنظيف التطبيق، بضبط `app.is_closing=True` ثم `app.destroy()`. يُفترض استعمال `NexusStreamManagerApp.on_close()` لإيقاف أيقونة النظام وخادم المتصفح.
+**السبب في مصدر الاختبارات:** `tearDownClass` ضمن `TestAnalyticsDialog` و`TestPhase11Dialogs` و`TestPhase12Dialogs` و`TestDialogsIntegration` في `test_link_recovery.py` كان يتجاوز تنظيف التطبيق، بضبط `app.is_closing=True` ثم `app.destroy()`. يُفترض استعمال `NexusStreamManagerApp.on_close()` لإيقاف أيقونة النظام وخادم المتصفح.
 
 ## 3. التغيير المحدود
 
