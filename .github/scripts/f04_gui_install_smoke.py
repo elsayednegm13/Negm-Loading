@@ -211,9 +211,9 @@ def run():
             raise RuntimeError("HKCU InstallLocation not under isolated test profile")
         if os.path.normcase(os.path.normpath(registry_value(safety.DEFAULT_UNINSTALL_KEY, "DisplayIcon"))) != expected_icon:
             raise RuntimeError("HKCU DisplayIcon points to wrong executable")
-        uninstaller = registry_value(safety.DEFAULT_UNINSTALL_KEY, "UninstallString").strip('"')
-        if os.path.normcase(os.path.normpath(uninstaller)) != os.path.normcase(os.path.normpath(str(install / safety.UNINSTALL_CMD_FILENAME))):
-            raise RuntimeError("HKCU UninstallString points outside the owned install")
+        uninstaller = registry_value(safety.DEFAULT_UNINSTALL_KEY, "UninstallString")
+        if uninstaller != engine.registry_uninstall_command(str(install)):
+            raise RuntimeError("HKCU UninstallString is not the exact registered PowerShell command")
         data["checks"]["hkcu_install_icon_uninstaller_contract"] = "PASS"
 
         expected_desktop = str(desktop_lnk)
@@ -333,9 +333,9 @@ def run():
                 subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                                check=False, capture_output=True, timeout=15)
                 data["killed_only_test_process"] = True
-        # IMPORTANT: This diagnostic intentionally invokes ONLY the NEW
-        # uninstall.cmd generated and fingerprinted by this same verified GUI
-        # installation. Never invoke the legacy main-branch uninstaller.
+        # Execute only the registered PowerShell command from this exact new
+        # GUI install after validating the bound manifest and both helper hashes.
+        # The legacy main-branch CMD is NEVER executed.
         if (safe_owned and install is not None and profile is not None
                 and data.get("result") == "PASS_F04_VM03_VM04_VM06_GUI_FRESH_AND_UPGRADE"):
             try:
@@ -372,7 +372,23 @@ def run():
                     raise RuntimeError("Wrong HKCU location; refusing to run")
                 data["new_uninstaller_provenance_checked"] = True
 
-                def execute_current_helper():
+                registered_command = registry_value(
+                    safety.DEFAULT_UNINSTALL_KEY, "UninstallString"
+                )
+                if registered_command != engine.registry_uninstall_command(str(install)):
+                    raise RuntimeError("UninstallString changed after ownership preflight")
+
+                def execute_registered_ps1():
+                    # On Windows Popen passes a string directly to CreateProcess,
+                    # faithfully exercising the actual UninstallString.
+                    res = subprocess.run(
+                        registered_command, cwd=str(profile),
+                        env=env, capture_output=True, text=True,
+                        timeout=90, check=False
+                    )
+                    return res.returncode, (res.stdout + "\n" + res.stderr)[-1200:]
+
+                def execute_owned_cmd_compat():
                     res = subprocess.run(
                         ["cmd.exe", "/d", "/c", str(cmd)], cwd=str(profile),
                         env=env, capture_output=True, text=True,
@@ -383,44 +399,55 @@ def run():
                 note = install / "f04-owned-by-test-user-note.txt"
                 if not note.is_file():
                     raise RuntimeError("Missing test user note before partial uninstall")
-                first_exit, first_log = execute_current_helper()
-                data["new_cmd_partial_exit"] = first_exit
-                data["new_cmd_partial_tail"] = first_log
-                data["new_cmd_preserved_user_note"] = (
+                first_exit, first_log = execute_registered_ps1()
+                data["registered_ps_partial_exit"] = first_exit
+                data["registered_ps_partial_tail"] = first_log
+                data["registered_ps_preserved_user_note"] = (
                     note.is_file() and note.read_bytes() ==
                     b"F04 TEST USER FILE - PRESERVE THROUGH UPGRADE AND PARTIAL UNINSTALL"
                 )
-                data["new_cmd_recovery_manifest_kept"] = (
+                data["registered_ps_recovery_manifest_kept"] = (
                     (install / safety.MANIFEST_FILENAME).is_file()
                 )
-                data["new_cmd_anchor_kept_after_partial"] = _existing_key(
+                data["registered_ps_anchor_kept_after_partial"] = _existing_key(
                     safety.DEFAULT_UNINSTALL_KEY
                 )
                 if (first_exit != safety.EXIT_PARTIAL
-                        or not data["new_cmd_preserved_user_note"]
-                        or not data["new_cmd_recovery_manifest_kept"]
-                        or not data["new_cmd_anchor_kept_after_partial"]):
-                    raise RuntimeError("New CMD did not return a recoverable partial uninstall")
+                        or not data["registered_ps_preserved_user_note"]
+                        or not data["registered_ps_recovery_manifest_kept"]
+                        or not data["registered_ps_anchor_kept_after_partial"]):
+                    raise RuntimeError("Registered PowerShell did not return a recoverable partial uninstall")
                 # Only the exact test-created note is removed, after proving
                 # bytes and absolute position. This never deletes real user data.
                 note.unlink()
-                final_exit, final_log = execute_current_helper()
-                data["new_cmd_final_exit"] = final_exit
-                data["new_cmd_final_tail"] = final_log
-                data["new_cmd_install_root_absent"] = not install.exists()
-                data["new_cmd_anchor_absent"] = not _existing_key(
+                compat_exit, compat_log = execute_owned_cmd_compat()
+                data["cmd_compat_exit"] = compat_exit
+                data["cmd_compat_tail"] = compat_log
+                data["cmd_compat_recovery_kept"] = (
+                    (install / safety.MANIFEST_FILENAME).is_file()
+                    and _existing_key(safety.DEFAULT_UNINSTALL_KEY)
+                    and cmd.is_file() and ps1.is_file()
+                )
+                if compat_exit != safety.EXIT_FINAL or not data["cmd_compat_recovery_kept"]:
+                    raise RuntimeError("Compatibility CMD returned misleading success or lost recovery")
+
+                final_exit, final_log = execute_registered_ps1()
+                data["registered_ps_final_exit"] = final_exit
+                data["registered_ps_final_tail"] = final_log
+                data["registered_ps_install_root_absent"] = not install.exists()
+                data["registered_ps_anchor_absent"] = not _existing_key(
                     safety.DEFAULT_UNINSTALL_KEY
                 )
-                data["new_cmd_shortcuts_absent"] = all(
+                data["registered_ps_shortcuts_absent"] = all(
                     not p.exists() for p in (desktop_lnk, start_lnk)
                 )
-                if (final_exit != safety.EXIT_OK or not data["new_cmd_install_root_absent"]
-                        or not data["new_cmd_anchor_absent"]
-                        or not data["new_cmd_shortcuts_absent"]):
-                    data["result"] = "FAIL_NEW_CMD_FINAL_CLEANUP_OR_OWNERSHIP"
+                if (final_exit != safety.EXIT_OK or not data["registered_ps_install_root_absent"]
+                        or not data["registered_ps_anchor_absent"]
+                        or not data["registered_ps_shortcuts_absent"]):
+                    data["result"] = "FAIL_REGISTERED_PS_FINAL_CLEANUP_OR_OWNERSHIP"
             except Exception as exc:
                 data["new_uninstaller_error"] = repr(exc)
-                data["result"] = "FAIL_NEW_CMD_RUNTIME_OR_GUARD"
+                data["result"] = "FAIL_REGISTERED_PS_RUNTIME_OR_GUARD"
         if profile is not None:
             guard = profile / "outside-sentinel.txt"
             if guard.exists():
@@ -429,10 +456,10 @@ def run():
                 )
         data["manual_vm_install_upgrade_uninstall_gate"] = "NOT_TESTED"
         if data.get("result") == "PASS_F04_VM03_VM04_VM06_GUI_FRESH_AND_UPGRADE":
-            if (data.get("new_cmd_final_exit") != safety.EXIT_OK
+            if (data.get("registered_ps_final_exit") != safety.EXIT_OK
                     or data.get("outside_sentinel_after_cleanup") is not True
                     or data.get("wizard_exit") != 0):
-                data["result"] = "FAIL_NEW_CMD_CLEANUP_OR_EXIT"
+                data["result"] = "FAIL_REGISTERED_PS_CLEANUP_OR_EXIT"
         REPORT.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
         # Enforce post-install safety outcomes as part of the actual CI exit.
