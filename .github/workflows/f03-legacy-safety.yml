@@ -1,0 +1,66 @@
+name: F03 legacy migration safety - isolated Windows verification
+
+on:
+  push:
+    branches:
+      - fix/f03-legacy-migration-safety
+    paths:
+      - .github/workflows/f03-legacy-safety.yml
+      - legacy_migration.py
+      - test_legacy_migration.py
+      - installer_safety.py
+      - installer_engine.py
+      - run_all_tests.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  f03-focused:
+    name: Legacy read-only triage plus F01/F02 ownership tests
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned requirements
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile migration and installer source
+        shell: cmd
+        run: python -m compileall -q legacy_migration.py installer_safety.py installer_engine.py test_legacy_migration.py
+      - name: Execute non-destructive F03 and installer ownership tests
+        shell: cmd
+        run: python -u -m unittest -v test_legacy_migration test_installer_safety
+
+  full-regression:
+    name: Full suite including F03 with real subprocess exit
+    runs-on: windows-2022
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned requirements
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run all tests, fail on any assertion or process hang
+        shell: cmd
+        run: python .github/scripts/s01_ci_watchdog.py full
+      - name: Preserve full-suite actual exit and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f03-full-suite-windows-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
