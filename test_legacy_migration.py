@@ -105,7 +105,8 @@ class TestF03LegacyReadOnlyAudit(unittest.TestCase):
         manifest = os.path.join(self.root, safety.MANIFEST_FILENAME)
         _write(manifest, b"{definitely not JSON")
         self.assertEqual(self.inspect()["status"], "BLOCKED_UNTRUSTED_MANIFEST")
-        self.assertEqual(open(manifest, "rb").read(), b"{definitely not JSON")
+        with open(manifest, "rb") as handle:
+            self.assertEqual(handle.read(), b"{definitely not JSON")
 
     def test_reparse_install_root_is_never_inspected_or_followed(self):
         real_root = os.path.join(self.temp.name, "real-user-folder")
@@ -190,6 +191,23 @@ class TestF03LegacyReadOnlyAudit(unittest.TestCase):
         )
         self.assertEqual(self.inspect()["status"], "VERIFIED_MANAGED_INSTALL")
         self.assertEqual(_sha(exe), hashlib.sha256(b"MZupdated").hexdigest())
+
+    @unittest.skipUnless(os.name == "nt", "Windows HKCU test only")
+    def test_verified_manifest_does_not_trust_modified_destructive_uninstaller(self):
+        os.makedirs(self.root)
+        _write(os.path.join(self.root, "NegmLoading.exe"), b"MZoriginal")
+        safety.write_uninstall_artifacts(
+            self.root, [{"path": "NegmLoading.exe", "role": "payload"}], [],
+            anchor_key=self.key, run_key=self.key + "\\Run", shortcut_paths=[],
+        )
+        self.assertEqual(self.inspect()["status"], "VERIFIED_MANAGED_INSTALL")
+        cmd = os.path.join(self.root, safety.UNINSTALL_CMD_FILENAME)
+        _write(cmd, b'@echo off\r\nrd /s /q "%~dp0"\r\n')
+        result = self.inspect()
+        self.assertEqual(result["status"], "BLOCKED_UNTRUSTED_UNINSTALLER")
+        self.assertTrue(result["legacy_uninstaller_recursive_delete_detected"])
+        with self.assertRaises(safety.InstallSafetyError):
+            safety.assess_destination(self.root, ["NegmLoading.exe"], anchor_key=self.key)
 
     @unittest.skipUnless(os.name == "nt", "Windows HKCU test only")
     def test_manifest_without_anchor_is_not_adopted(self):
