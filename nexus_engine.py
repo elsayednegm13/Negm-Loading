@@ -4105,7 +4105,8 @@ class ProxyManager:
     def add_proxy(self, name: str, protocol: str = "http", host: str = "",
                   port: int = 8080, username: str = "", password: str = "", is_active: bool = False) -> dict:
         with self.lock:
-            p_id = hex(int(time.time() * 1000))[2:]
+            # Clock ticks may repeat, so timestamp-based IDs can collide.
+            p_id = uuid.uuid4().hex
             if is_active:
                 for p in self.proxies:
                     p["is_active"] = False
@@ -4140,11 +4141,13 @@ class ProxyManager:
 
     def delete_proxy(self, proxy_id: str) -> bool:
         with self.lock:
-            orig = len(self.proxies)
-            self.proxies = [p for p in self.proxies if p.get("id") != proxy_id]
-            if len(self.proxies) != orig:
-                self._save()
-                return True
+            # Legacy data may already contain colliding timestamp IDs.
+            # Delete only the selected record, never every record with that ID.
+            for idx, proxy in enumerate(self.proxies):
+                if proxy.get("id") == proxy_id:
+                    del self.proxies[idx]
+                    self._save()
+                    return True
         return False
 
     def set_active_proxy(self, proxy_id: Optional[str]) -> bool:
