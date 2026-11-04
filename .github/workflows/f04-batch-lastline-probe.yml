@@ -1,0 +1,35 @@
+name: F04 isolated batch self-cleanup experiment (NO PRODUCT EXECUTION)
+
+on:
+  push:
+    branches:
+      - fix/f04-uninstall-completion-verified
+    paths:
+      - .github/workflows/f04-batch-lastline-probe.yml
+      - .github/scripts/f04_batch_lastline_probe.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scratch-only:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test single-line last CMD statement only in RUNNER_TEMP
+        shell: cmd
+        run: python .github/scripts/f04_batch_lastline_probe.py
+      - name: Preserve diagnostic JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-scratch-batch-experiment
+          path: f04-batch-lastline-experiment.json
+          if-no-files-found: warn
