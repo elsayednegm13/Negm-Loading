@@ -59,6 +59,21 @@ class TestProxyManager(unittest.TestCase):
         self.assertEqual(len(self.pm.get_all_proxies()), 1)
 
 
+    def test_distinct_ids_even_when_clock_is_frozen(self):
+        # Regression: timestamp-derived IDs collide on rapid additions, and
+        # delete_proxy(id) then mistakenly removes both saved records.
+        with patch.object(E.time, "time", return_value=1_700_000_000.123):
+            first = self.pm.add_proxy("First", "http", "10.10.10.1", 8080)
+            second = self.pm.add_proxy("Second", "socks5", "10.10.10.2", 1080)
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(len(self.pm.get_all_proxies()), 2)
+        self.assertTrue(self.pm.delete_proxy(first["id"]))
+        remaining = self.pm.get_all_proxies()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["id"], second["id"])
+        self.assertEqual(remaining[0]["name"], "Second")
+
+
 class TestSiteCredentialVault(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
