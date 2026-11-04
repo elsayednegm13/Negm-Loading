@@ -3,7 +3,7 @@ name: F02 freshly packaged Windows setup preflight (no publish)
 on:
   push:
     branches:
-      - verification/f02-packaged-setup-gate-20261104
+      - fix/f02-executable-contract
     paths:
       - .github/workflows/f02-packaged-build-gate.yml
       - .github/scripts/f02_packaged_probe.py
