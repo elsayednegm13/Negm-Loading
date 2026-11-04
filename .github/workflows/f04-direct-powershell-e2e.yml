@@ -1,0 +1,118 @@
+name: F04 direct PowerShell uninstall: regression + real packaged GUI E2E
+
+on:
+  push:
+    branches:
+      - fix/f04-direct-powershell-uninstall
+    paths:
+      - .github/workflows/f04-direct-powershell-e2e.yml
+      - installer_engine.py
+      - .github/scripts/f04_gui_install_smoke.py
+      - installer_safety.py
+      - test_installer_safety.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    name: Legacy, ownership, direct PS and CMD compatibility tests
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile patched PowerShell generator and tests
+        shell: cmd
+        run: python -m compileall -q installer_safety.py test_installer_safety.py
+      - name: Run safe ownership, legacy, and F04 exe identity regressions
+        shell: cmd
+        run: python -u -m unittest -v test_installer_safety test_legacy_migration
+
+  full:
+    name: All project tests with actual natural exit
+    runs-on: windows-2022
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run complete suite with watchdog and actual exit
+        shell: cmd
+        run: python .github/scripts/s01_ci_watchdog.py full
+      - name: Preserve full suite exit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-identity-full-suite-evidence
+          path: |
+            f01-full-ci.log
+            f01-full-ci.meta.txt
+          if-no-files-found: warn
+
+  gui-package:
+    name: Fresh real GUI install, upgrade, CMD compatibility, registered PS uninstall
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Require disposable hosted Windows runner
+        shell: cmd
+        run: |
+          if not "%RUNNER_ENVIRONMENT%"=="github-hosted" exit /b 2
+          if not "%RUNNER_OS%"=="Windows" exit /b 2
+          if "%RUNNER_TEMP%"=="" exit /b 2
+      - name: Install pinned requirements
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile GUI harness and product changes
+        shell: cmd
+        run: python -m compileall -q installer_engine.py installer_safety.py .github/scripts/f04_gui_install_smoke.py
+      - name: Build real app from current source
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading.spec
+      - name: Build embedded ZIP from new app
+        shell: cmd
+        run: python make_installer_package.py
+      - name: Rebuild real Setup.exe from this exact commit
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading-Setup.spec
+      - name: Check actual setup archive and test-only backend ownership
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py
+      - name: Require packaged preflight pass (not release approval)
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py --gate
+      - name: GUI install/upgrade then execute bound HKCU PowerShell uninstall
+        shell: cmd
+        run: python .github/scripts/f04_gui_install_smoke.py
+      - name: Preserve JSON checks only, never publish executable
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-registered-direct-powershell-e2e-evidence
+          path: |
+            f02-packaged-build-evidence.json
+            f04-gui-fresh-install-evidence.json
+          if-no-files-found: warn
