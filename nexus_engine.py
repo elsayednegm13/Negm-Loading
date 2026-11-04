@@ -4253,7 +4253,8 @@ class SiteCredentialVault:
                        username: str = "", password: str = "", token: str = "",
                        cookies: str = "", headers: dict = None, notes: str = "") -> dict:
         with self.lock:
-            c_id = hex(int(time.time() * 1000))[2:]
+            # Creation within the same millisecond must not reuse a vault ID.
+            c_id = uuid.uuid4().hex
             clean_dom = domain.strip().lower()
             if clean_dom.startswith("www."):
                 clean_dom = clean_dom[4:]
@@ -4288,11 +4289,13 @@ class SiteCredentialVault:
 
     def delete_credential(self, cred_id: str) -> bool:
         with self.lock:
-            orig = len(self.credentials)
-            self.credentials = [c for c in self.credentials if c.get("id") != cred_id]
-            if len(self.credentials) != orig:
-                self._save()
-                return True
+            # Older stores may already contain timestamp-ID collisions.
+            # Preserve the other credentials when deleting one.
+            for idx, cred in enumerate(self.credentials):
+                if cred.get("id") == cred_id:
+                    del self.credentials[idx]
+                    self._save()
+                    return True
         return False
 
     def get_headers_for_url(self, url: str) -> dict:
