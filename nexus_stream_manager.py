@@ -128,6 +128,7 @@ class NexusStreamManagerApp(_AppBase):
         self._sidebar_collapsed = False
         self._toolbar_compact = False
         self._resize_job = None
+        self._pending_ui_rebuild = None
         self._syncing_search = False
 
         self.search_var = ctk.StringVar()
@@ -1882,6 +1883,10 @@ class NexusStreamManagerApp(_AppBase):
         SchedulerDialog(self)
 
     def show_command_palette(self, event=None):
+        # A language switch schedules a deferred rebuild that destroys child
+        # dialogs. Flush it before constructing a new modal Toplevel.
+        if getattr(self, "_pending_ui_rebuild", None) is not None:
+            self.rebuild_ui()
         if getattr(self, "palette_dialog", None) and self.palette_dialog.winfo_exists():
             try:
                 self.palette_dialog.lift()
@@ -2059,9 +2064,25 @@ class NexusStreamManagerApp(_AppBase):
         ctk.set_appearance_mode(self.settings["theme"])
         self.save_state()
         if rebuild:
-            self.after(60, self.rebuild_ui)
+            # Coalesce rapid language changes into one rebuild.
+            pending = getattr(self, "_pending_ui_rebuild", None)
+            if pending is not None:
+                try:
+                    self.after_cancel(pending)
+                except Exception:
+                    pass
+            self._pending_ui_rebuild = self.after(60, self.rebuild_ui)
 
     def rebuild_ui(self):
+        # Also cancel deferred callbacks when called synchronously, so they
+        # cannot destroy a newly opened dialog on a subsequent Tk update.
+        pending = getattr(self, "_pending_ui_rebuild", None)
+        self._pending_ui_rebuild = None
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
         sel_urls = {r.task.url for r in self.selected}
         for child in list(self.winfo_children()):
             child.destroy()
