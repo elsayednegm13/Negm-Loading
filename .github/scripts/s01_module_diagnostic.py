@@ -25,6 +25,9 @@ def child(module: str) -> int:
     sys.stderr.reconfigure(line_buffering=True)
     faulthandler.enable()
     faulthandler.dump_traceback_later(55, repeat=False)
+    # Python sets sys.path[0] to .github/scripts when invoked by filename.
+    # Load the project test modules from the checked-out repository root.
+    sys.path.insert(0, str(Path.cwd()))
     original_start = threading.Thread.start
 
     def observed_start(thread: threading.Thread):
