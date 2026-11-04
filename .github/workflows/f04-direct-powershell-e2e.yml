@@ -1,4 +1,4 @@
-name: F04 direct PowerShell uninstall: regression + real packaged GUI E2E
+name: "F04 direct PowerShell uninstall: regression + real packaged GUI E2E"
 
 on:
   push:
