@@ -8,6 +8,7 @@ import sys
 import time
 import tempfile
 import unittest
+from unittest.mock import patch
 import base64
 
 import nexus_engine as E
@@ -56,6 +57,33 @@ class TestProxyManager(unittest.TestCase):
         # 5. Delete Proxy
         self.pm.delete_proxy(p1["id"])
         self.assertEqual(len(self.pm.get_all_proxies()), 1)
+
+
+    def test_distinct_ids_even_when_clock_is_frozen(self):
+        # Regression: timestamp-derived IDs collide on rapid additions, and
+        # delete_proxy(id) then mistakenly removes both saved records.
+        with patch.object(E.time, "time", return_value=1_700_000_000.123):
+            first = self.pm.add_proxy("First", "http", "10.10.10.1", 8080)
+            second = self.pm.add_proxy("Second", "socks5", "10.10.10.2", 1080)
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(len(self.pm.get_all_proxies()), 2)
+        self.assertTrue(self.pm.delete_proxy(first["id"]))
+        remaining = self.pm.get_all_proxies()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["id"], second["id"])
+        self.assertEqual(remaining[0]["name"], "Second")
+
+
+    def test_delete_preserves_legacy_records_with_colliding_ids(self):
+        # Existing installations may have duplicate timestamp-based IDs.
+        # A delete-by-ID must never erase every matching saved preset.
+        original = self.pm.add_proxy("Old first", "http", "127.0.0.1", 8080)
+        survivor = self.pm.add_proxy("Old second", "http", "127.0.0.2", 8081)
+        survivor["id"] = original["id"]  # Model old on-disk corruption.
+        self.assertTrue(self.pm.delete_proxy(original["id"]))
+        remaining = self.pm.get_all_proxies()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["name"], "Old second")
 
 
 class TestSiteCredentialVault(unittest.TestCase):
@@ -129,12 +157,15 @@ class TestPhase11Dialogs(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls.app is not None:
-            try:
-                cls.app.is_closing = True
-                cls.app.destroy()
-            except Exception:
-                pass
+        if cls.app is None:
+            return
+        # UI test fixtures must use the application lifecycle to stop the
+        # tray and browser bridge threads; direct destroy() bypasses it.
+        cls.app.force_exit = True
+        # State persistence is irrelevant to widget tests and must not leak
+        # test data into the runner's settings or task history.
+        with patch.object(cls.app, "save_state", return_value=None):
+            cls.app.on_close()
 
     def setUp(self):
         if self.app is None:
