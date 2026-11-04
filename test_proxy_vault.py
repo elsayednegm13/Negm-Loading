@@ -146,6 +146,27 @@ class TestSiteCredentialVault(unittest.TestCase):
             global_vault.delete_credential(cred["id"])
 
 
+    def test_credential_ids_are_unique_with_frozen_clock(self):
+        with patch.object(E.time, "time", return_value=1_700_000_000.123):
+            first = self.vault.add_credential("first.example", "basic", username="a")
+            second = self.vault.add_credential("second.example", "basic", username="b")
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(len(self.vault.get_all_credentials()), 2)
+        self.assertTrue(self.vault.delete_credential(first["id"]))
+        remaining = self.vault.get_all_credentials()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["domain"], "second.example")
+
+    def test_credential_delete_preserves_legacy_duplicate(self):
+        first = self.vault.add_credential("first.example", "bearer", token="dummy-one")
+        second = self.vault.add_credential("second.example", "bearer", token="dummy-two")
+        second["id"] = first["id"]
+        self.assertTrue(self.vault.delete_credential(first["id"]))
+        remaining = self.vault.get_all_credentials()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["domain"], "second.example")
+
+
 class TestPhase11Dialogs(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
