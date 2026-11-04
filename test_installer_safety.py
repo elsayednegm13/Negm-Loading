@@ -515,6 +515,17 @@ def _run_uninstall_cmd(root):
     return subprocess.run(command, cwd=root, capture_output=True, text=True)
 
 
+def _run_uninstall_ps1(root):
+    """Match the new Windows UninstallString: standalone PS, no active CMD."""
+    helper = os.path.join(root, safety.UNINSTALL_PS1_FILENAME)
+    return subprocess.run(
+        [_powershell_exe(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+         "Bypass", "-File", helper],
+        cwd=os.path.dirname(root), capture_output=True, text=True, timeout=80,
+        check=False,
+    )
+
+
 def _make_shortcut(path, target):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     env = os.environ.copy()
@@ -584,6 +595,30 @@ def _unlock(handle):
 
 
 class TestWindowsUninstallChain(unittest.TestCase):
+    def test_cmd_launcher_returns_recoverable_4_then_registered_ps1_finishes(self):
+        if os.name != "nt":
+            self.skipTest("Windows uninstall chain")
+        import winreg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Owned Install")
+            os.makedirs(root)
+            key = _install_owned(root, {"owned.exe": b"owned"}, created_root=True)
+            incomplete = _run_uninstall_cmd(root)
+            self.assertEqual(incomplete.returncode, safety.EXIT_FINAL,
+                             incomplete.stdout + incomplete.stderr)
+            self.assertTrue(os.path.isdir(root))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.MANIFEST_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key):
+                pass
+            completed = _run_uninstall_ps1(root)
+            self.assertEqual(completed.returncode, safety.EXIT_OK,
+                             completed.stdout + completed.stderr)
+            self.assertFalse(os.path.lexists(root))
+            with self.assertRaises(FileNotFoundError):
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, key)
+
     def test_cmd_missing_helper_exits_2_and_keeps_inventory(self):
         if os.name != "nt":
             self.skipTest("Windows uninstall.cmd chain")
@@ -715,7 +750,7 @@ class TestWindowsUninstallChain(unittest.TestCase):
             _OPEN_KEYS.append(foreign)
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER, foreign) as reg:
                 winreg.SetValueEx(reg, "Marker", 0, winreg.REG_SZ, "other-install")
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
             self.assertEqual(open(outside, encoding="utf-8").read(), "do-not-touch")
@@ -861,7 +896,7 @@ class TestWindowsUninstallChain(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_CMD_FILENAME)))
             winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
             self.assertEqual(_sha(user), before)
-            second = _run_uninstall_cmd(root)
+            second = _run_uninstall_ps1(root)
             self.assertEqual(second.returncode, safety.EXIT_OK, second.stdout + second.stderr)
             self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
             self.assertFalse(os.path.isfile(link))
@@ -888,7 +923,7 @@ class TestWindowsUninstallChain(unittest.TestCase):
                 winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
             finally:
                 os.chmod(manifest, stat.S_IWRITE)
-            again = _run_uninstall_cmd(root)
+            again = _run_uninstall_ps1(root)
             self.assertEqual(again.returncode, safety.EXIT_OK, again.stdout + again.stderr)
             with self.assertRaises(OSError):
                 winreg.OpenKey(winreg.HKEY_CURRENT_USER, key)
@@ -933,7 +968,7 @@ class TestWindowsUninstallChain(unittest.TestCase):
                      "Set-Acl $env:F01_KEY $acl"],
                     env=env, capture_output=True, text=True,
                 )
-            again = _run_uninstall_cmd(root)
+            again = _run_uninstall_ps1(root)
             self.assertEqual(again.returncode, safety.EXIT_OK, again.stdout + again.stderr)
 
 
@@ -1003,7 +1038,7 @@ class TestIntegrationOwnership(unittest.TestCase):
             link = os.path.join(tmp, "links", "foreign.lnk")
             _make_shortcut(link, os.path.join(root, "owned.exe"))
             before = _sha(link)
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertEqual(_sha(link), before)
             self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
@@ -1033,7 +1068,7 @@ class TestIntegrationOwnership(unittest.TestCase):
                     self.assertEqual(_sha(link), link_before)
                     self.assertTrue(os.path.isfile(link))
                     os.remove(inside_user)
-                    proc = _run_uninstall_cmd(root)
+                    proc = _run_uninstall_ps1(root)
                     self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
                     self.assertEqual(_sha(user), before)
                     self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
@@ -1053,7 +1088,7 @@ class TestIntegrationOwnership(unittest.TestCase):
             self.assertEqual(record["sha256"], _sha(link))
             self.assertTrue(record["target"])
             safety.verify_install_anchor(root, manifest, key)
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertFalse(os.path.isfile(link))
 
@@ -1117,7 +1152,7 @@ class TestIntegrationOwnership(unittest.TestCase):
             _install_owned(root, {"owned.exe": b"payload"}, shortcut_paths=[link])
             _make_shortcut(link, os.path.join(root, "owned.exe"))
             before = _sha(link)
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertIn("no install-time fingerprint and was kept", proc.stdout or "")
             self.assertEqual(_sha(link), before)
@@ -1141,7 +1176,7 @@ class TestIntegrationOwnership(unittest.TestCase):
                 json.dump(data, handle)
             safety.write_install_anchor(root, key, safety.load_manifest(root))
             before = _sha(link)
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertIn("no install-time fingerprint and was kept", proc.stdout or "")
             self.assertEqual(_sha(link), before)
@@ -1306,7 +1341,7 @@ class TestReinstallPreflight(unittest.TestCase):
             with open(os.path.join(root, "owned.exe"), "rb") as handle:
                 self.assertEqual(handle.read(), b"payload-v2")
             self.assertEqual(_sha(outside), outside_hash)
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
             self.assertEqual(_sha(outside), outside_hash)
@@ -1390,7 +1425,7 @@ class TestReinstallPreflight(unittest.TestCase):
             _write(outside, "keep")
             before = _sha(outside)
             _install_owned(root, {"owned.exe": b"payload"})
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertEqual(_sha(outside), before)
             self.assertFalse(os.path.isfile(os.path.join(root, "owned.exe")))
@@ -1477,7 +1512,7 @@ class TestShortcutUpgradeCarryForward(unittest.TestCase):
                 safety.read_install_anchor(key)["manifest_sha256"],
                 safety.manifest_fingerprint(after),
             )
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertFalse(os.path.isfile(link))
             self.assertEqual(_sha(outside), outside_hash)
@@ -1526,7 +1561,7 @@ class TestShortcutUpgradeCarryForward(unittest.TestCase):
             self.assertEqual(after["shortcuts"], [])
             self.assertFalse(after["created_root"])
             self.assertEqual(_sha(foreign), foreign_hash)
-            proc = _run_uninstall_cmd(root)
+            proc = _run_uninstall_ps1(root)
             self.assertEqual(proc.returncode, safety.EXIT_OK, proc.stdout + proc.stderr)
             self.assertEqual(_sha(foreign), foreign_hash)
             self.assertTrue(os.path.isdir(root))
@@ -1662,6 +1697,29 @@ class TestF04GeneratedCmdAndExeIdentity(unittest.TestCase):
         self.assertIn("$AppExeName = 'NegmLoading.exe'", script)
         self.assertIn("Compare($leaf, $AppExeName)", script)
         self.assertNotIn("$AppName + '.exe'", script)
+        self.assertFalse(safety.script_contains_forbidden_deletion(script))
+
+    def test_registered_direct_powershell_command_is_not_cmd_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "Modern Owned Install")
+            os.makedirs(root)
+            _write(os.path.join(root, safety.UNINSTALL_PS1_FILENAME), b"# only for command composition")
+            command = installer_engine.registry_uninstall_command(root)
+            self.assertIn("powershell.exe", command.lower())
+            self.assertIn("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File", command)
+            self.assertIn(safety.UNINSTALL_PS1_FILENAME, command)
+            self.assertNotIn(safety.UNINSTALL_CMD_FILENAME, command)
+            self.assertNotIn("-FromCmd", command)
+            self.assertEqual(command.count('"'), 4)
+
+    def test_generated_cmd_explicitly_marks_compatibility_invocation(self):
+        cmd = safety.generate_uninstall_cmd()
+        self.assertIn(" -FromCmd", cmd)
+        script = safety._powershell_uninstaller()
+        self.assertIn("param([switch]$FromCmd)", script)
+        self.assertIn("if ($FromCmd)", script)
+        self.assertIn("[IO.Directory]::Delete($Root)", script)
+        self.assertNotIn("[IO.Directory]::Delete($Root, $true)", script)
         self.assertFalse(safety.script_contains_forbidden_deletion(script))
 
     def test_uninstaller_wrapper_contains_no_unsafe_recursive_deletion(self):
