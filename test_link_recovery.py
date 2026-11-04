@@ -119,12 +119,12 @@ class TestDialogsIntegration(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls.app is not None:
-            try:
-                cls.app.is_closing = True
-                cls.app.destroy()
-            except Exception:
-                pass
+        if cls.app is None:
+            return
+        # Shut down tray and browser bridge, not just the Tk root.
+        cls.app.force_exit = True
+        with patch.object(cls.app, "save_state", return_value=None):
+            cls.app.on_close()
 
     def setUp(self):
         if self.app is None:
