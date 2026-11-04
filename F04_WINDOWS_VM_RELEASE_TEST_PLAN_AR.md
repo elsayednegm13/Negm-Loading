@@ -8,6 +8,8 @@
 
 **قاعدة سلامة ملزمة:** لا تشغّل `uninstall.cmd` الموروث. في نسخة `main` القديمة كان يحتوي على `rd /s /q`. لا تنفذ `Apps & Features > Uninstall` عندما تشير `UninstallString` إلى المزيل القديم، حتى داخل سيناريو ترحيل لم تتحدد مخاطره.
 
+**نتيجة مثبتة:** نجح [تشغيل #41907102127](https://github.com/elsayednegm13/Negm-Loading/actions/runs/41907102127): ظهرت نافذة `Setup Wizard` من ملف `Setup.exe` المعبأ نفسه وأُغلقت برمز `0`، مع غياب تسجيل إزالة إنتاجي ومجلد التثبيت الافتراضي قبل التجربة وبعدها. هذا **قبول لفتح وإغلاق المعالج فقط**، وليس تثبيتًا تفاعليًا كاملًا. راجع `F04_PACKAGED_GUI_LAUNCH_ACCEPTANCE_AR.md`.
+
 ## ما يغطيه اختبار GitHub Actions الآلي
 
 [تشغيل F-04 لفتح وإغلاق المعالج](https://github.com/elsayednegm13/Negm-Loading/actions/runs/41906770761) مصمم لبناء `NegmLoading.exe` و`NegmLoading-Setup.exe` حديثين، وتأكيد الحمولة المضمّنة عبر بوابة `F-02`، ثم محاولة فتح **ملف المثبت المعبأ نفسه** والتحقق من ظهور نافذة `Setup Wizard`، وإغلاقها باستخدام `WM_CLOSE` دون نقر تثبيت.
@@ -50,4 +52,4 @@
 
 ## قرار البوابة حتى تسليم الأدلة
 
-**`F04 PACKAGED GUI LAUNCH CHECK IN PROGRESS / VM FULL INSTALL-UPGRADE-UNINSTALL NOT TESTED / LEGACY MIGRATION AUTOMATION NO-GO / RELEASE NO-GO`.**
+**`F04 PACKAGED GUI OPEN/CLOSE PASS (Actions #41907102127) / VM FULL INSTALL-UPGRADE-UNINSTALL NOT TESTED / LEGACY MIGRATION AUTOMATION NO-GO / RELEASE NO-GO`.**
