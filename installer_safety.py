@@ -25,6 +25,8 @@ UNINSTALL_CMD_FILENAME = "uninstall.cmd"
 UNINSTALL_PS1_FILENAME = "negmloading-uninstall.ps1"
 MANIFEST_VERSION = 1
 DEFAULT_APP_NAME = "Negm Lodaing"
+# Filename is independent of the historical display/HKCU identity.
+DEFAULT_APP_EXE_FILENAME = "NegmLoading.exe"
 DEFAULT_UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Negm Lodaing"
 DEFAULT_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 TEST_ANCHOR_PREFIX = "Software\\NegmLoadingF01Test\\"
@@ -1259,6 +1261,7 @@ def _powershell_uninstaller(app_name, anchor_key=None, run_key=None, shortcut_pa
         quoted.append(_ps_single_quote(os.path.abspath(path)))
     text = _POWERSHELL_TEMPLATE
     text = text.replace("__APP_NAME__", app)
+    text = text.replace("__APP_EXE__", DEFAULT_APP_EXE_FILENAME)
     text = text.replace("__ANCHOR_KEY__", anchor_key)
     text = text.replace("__RUN_KEY__", run_key)
     text = text.replace("__SHORTCUTS__", ", ".join(quoted))
@@ -1269,6 +1272,7 @@ def _powershell_uninstaller(app_name, anchor_key=None, run_key=None, shortcut_pa
 
 _CMD_TEMPLATE = """@echo off\r
 setlocal EnableExtensions\r
+set "CREATED_ROOT=__CREATED_ROOT__"\r
 title Removing __APP_NAME__...\r
 rem Exit 0: payload removed and final cleanup verified by PowerShell.\r
 rem Exit 2: verification failed. No files, shortcuts, or registry values were removed.\r
@@ -1285,7 +1289,18 @@ exit /b %EC%\r
 echo MANUAL CLEANUP REQUIRED: missing uninstall helper. Exit code 2.\r
 exit /b 2\r
 :Announce\r
-echo __APP_NAME__ owned files were removed.\r
+rem PowerShell has verified the ownership manifest and installation anchor.\r
+rem Delete only THIS wrapper and an EMPTY root originally created by setup.\r
+rem No recursive removal: leave other files untouched and return exit 4 on failure.\r
+echo __APP_NAME__ owned payload removed; finalizing wrapper cleanup.\r
+if "%CREATED_ROOT%"=="1" (\r
+    del /q "%~f0" >nul 2>&1\r
+    rd "%~dp0" >nul 2>&1\r
+    if exist "%~dp0." exit /b 4\r
+) else (\r
+    del /q "%~f0" >nul 2>&1\r
+    if exist "%~f0" exit /b 4\r
+)\r
 exit /b 0\r
 :FinalReported\r
 echo MANUAL CLEANUP REQUIRED: payload was removed but final cleanup is incomplete. Recovery scripts were kept. Exit code 4.\r
@@ -1572,7 +1587,7 @@ if (-not (Test-Anchor $manifest)) {
 }
 
 try {
-    $AppExeName = $AppName + '.exe'
+    $AppExeName = '__APP_EXE__'
     Get-CimInstance Win32_Process | ForEach-Object {
         $exe = [string]$_.ExecutablePath
         if ([string]::IsNullOrWhiteSpace($exe)) { return }
@@ -1719,7 +1734,7 @@ try {
                 $parent = [IO.Path]::GetDirectoryName($exePath)
                 $rootCmp = [IO.Path]::GetFullPath($Root).TrimEnd('\')
                 if ($parent -and
-                    ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, ($AppName + '.exe')) -eq 0) -and
+                    ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, $AppExeName) -eq 0) -and
                     ([StringComparer]::OrdinalIgnoreCase.Compare($parent.TrimEnd('\'), $rootCmp) -eq 0)) {
                     $targetsUs = $true
                 }
