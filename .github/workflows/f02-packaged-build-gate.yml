@@ -31,6 +31,12 @@ jobs:
       - name: Install project build dependencies
         shell: cmd
         run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile patched setup code and F02 tests
+        shell: cmd
+        run: python -m compileall -q installer_engine.py test_installer_safety.py .github/scripts/f02_packaged_probe.py
+      - name: Run ownership, shortcut and filename contract regression tests
+        shell: cmd
+        run: python -u -m unittest -v test_installer_safety
       - name: Build app executable from current verified source
         shell: cmd
         run: pyinstaller --clean --noconfirm NegmLoading.spec
@@ -50,6 +56,6 @@ jobs:
           name: f02-packaged-preflight-report
           path: f02-packaged-build-evidence.json
           if-no-files-found: warn
-      - name: Enforce F02 release NO-GO on EXE name mismatch
+      - name: Enforce packaged backend preflight; VM release gate stays NO-GO
         shell: cmd
         run: python .github/scripts/f02_packaged_probe.py --gate
