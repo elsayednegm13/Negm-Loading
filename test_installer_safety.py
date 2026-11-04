@@ -1649,6 +1649,39 @@ class TestF02ExecutableFilenameContract(unittest.TestCase):
         )
 
 
+
+class TestF04GeneratedCmdAndExeIdentity(unittest.TestCase):
+    def test_uninstaller_targets_real_packaged_exe_not_legacy_display_name(self):
+        self.assertEqual(safety.DEFAULT_APP_EXE_FILENAME, installer_engine.APP_EXE_FILENAME)
+        script = safety._powershell_uninstaller(
+            installer_engine.APP_NAME,
+            anchor_key=safety.DEFAULT_UNINSTALL_KEY,
+            run_key=safety.DEFAULT_RUN_KEY,
+            shortcut_paths=[],
+        )
+        self.assertIn("$AppExeName = 'NegmLoading.exe'", script)
+        self.assertIn("Compare($leaf, $AppExeName)", script)
+        self.assertNotIn("$AppName + '.exe'", script)
+        self.assertFalse(safety.script_contains_forbidden_deletion(script))
+
+    def test_finalizer_only_deletes_current_cmd_and_attempts_empty_root(self):
+        for owns_root in (False, True):
+            wrapper = safety.generate_uninstall_cmd(
+                installer_engine.APP_NAME, created_root=owns_root,
+            )
+            self.assertFalse(safety.script_contains_forbidden_deletion(wrapper))
+            self.assertIn('del /q "%~f0"', wrapper)
+            self.assertIn('rd "%~dp0"', wrapper)
+            self.assertIn('if exist "%~dp0." exit /b 4', wrapper)
+            self.assertNotIn("__CREATED_ROOT__", wrapper)
+            self.assertIn(
+                'set "CREATED_ROOT=%s"' % ("1" if owns_root else "0"), wrapper
+            )
+            self.assertNotIn("rd /s", wrapper.lower())
+            self.assertNotIn("rmdir /s", wrapper.lower())
+
+
+
 def _value_exists(key, name):
     import winreg
     try:
