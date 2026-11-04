@@ -3659,7 +3659,8 @@ class DownloadHistoryManager:
 
     def record_download(self, task, status: str = "completed", error_msg: str = "", duration_sec: float = 0.0) -> dict:
         with self.lock:
-            rec_id = hex(int(time.time() * 1000))[2:]
+            # Multiple records can be created in one millisecond.
+            rec_id = uuid.uuid4().hex
             filename = getattr(task, "filename", "") or "unknown_file"
             url = getattr(task, "url", "") or ""
             save_path = getattr(task, "save_path", "") or ""
@@ -3782,11 +3783,13 @@ class DownloadHistoryManager:
 
     def delete_record(self, record_id: str) -> bool:
         with self.lock:
-            orig_len = len(self.records)
-            self.records = [r for r in self.records if r.get("id") != record_id]
-            if len(self.records) != orig_len:
-                self._save()
-                return True
+            # Old on-disk histories may already contain duplicate IDs.
+            # Preserve all other entries when deleting the selected record.
+            for idx, rec in enumerate(self.records):
+                if rec.get("id") == record_id:
+                    del self.records[idx]
+                    self._save()
+                    return True
             return False
 
     def clear_history(self) -> bool:
