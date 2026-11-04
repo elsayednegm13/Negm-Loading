@@ -210,6 +210,43 @@ class TestF03LegacyReadOnlyAudit(unittest.TestCase):
             safety.assess_destination(self.root, ["NegmLoading.exe"], anchor_key=self.key)
 
     @unittest.skipUnless(os.name == "nt", "Windows HKCU test only")
+    def test_recorded_file_modified_after_install_blocks_migration_candidate(self):
+        os.makedirs(self.root)
+        exe = os.path.join(self.root, installer_engine.APP_EXE_FILENAME)
+        _write(exe, b"MZtrusted-payload")
+        safety.write_uninstall_artifacts(
+            self.root, [{"path": installer_engine.APP_EXE_FILENAME, "role": "payload"}], [],
+            anchor_key=self.key, run_key=self.key + "\\Run", shortcut_paths=[],
+        )
+        self.assertEqual(self.inspect()["status"], "VERIFIED_MANAGED_INSTALL")
+        _write(exe, b"MZmodified-user-file")
+        result = self.inspect()
+        self.assertEqual(result["status"], "BLOCKED_MODIFIED_OWNED_PAYLOAD")
+        self.assertFalse(result["can_install_or_upgrade"])
+        with self.assertRaises(safety.InstallSafetyError):
+            safety.assess_destination(
+                self.root, [installer_engine.APP_EXE_FILENAME], anchor_key=self.key
+            )
+        self.assertEqual(_sha(exe), hashlib.sha256(b"MZmodified-user-file").hexdigest())
+
+    @unittest.skipUnless(os.name == "nt", "Windows HKCU test only")
+    def test_manifest_recovery_temp_blocks_migration_candidate(self):
+        os.makedirs(self.root)
+        exe = os.path.join(self.root, installer_engine.APP_EXE_FILENAME)
+        _write(exe, b"MZtrusted-payload")
+        safety.write_uninstall_artifacts(
+            self.root, [{"path": installer_engine.APP_EXE_FILENAME, "role": "payload"}], [],
+            anchor_key=self.key, run_key=self.key + "\\Run", shortcut_paths=[],
+        )
+        self.assertEqual(self.inspect()["status"], "VERIFIED_MANAGED_INSTALL")
+        blocker = os.path.join(self.root, safety.MANIFEST_FILENAME + ".retiring")
+        _write(blocker, b"foreign-recovery-marker")
+        result = self.inspect()
+        self.assertEqual(result["status"], "BLOCKED_MODIFIED_OWNED_PAYLOAD")
+        self.assertFalse(result["can_install_or_upgrade"])
+        self.assertEqual(_sha(blocker), hashlib.sha256(b"foreign-recovery-marker").hexdigest())
+
+    @unittest.skipUnless(os.name == "nt", "Windows HKCU test only")
     def test_manifest_without_anchor_is_not_adopted(self):
         os.makedirs(self.root)
         _write(os.path.join(self.root, "NegmLoading.exe"), b"MZ")
