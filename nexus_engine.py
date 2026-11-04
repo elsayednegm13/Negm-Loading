@@ -3659,7 +3659,8 @@ class DownloadHistoryManager:
 
     def record_download(self, task, status: str = "completed", error_msg: str = "", duration_sec: float = 0.0) -> dict:
         with self.lock:
-            rec_id = hex(int(time.time() * 1000))[2:]
+            # Multiple records can be created in one millisecond.
+            rec_id = uuid.uuid4().hex
             filename = getattr(task, "filename", "") or "unknown_file"
             url = getattr(task, "url", "") or ""
             save_path = getattr(task, "save_path", "") or ""
@@ -3782,11 +3783,13 @@ class DownloadHistoryManager:
 
     def delete_record(self, record_id: str) -> bool:
         with self.lock:
-            orig_len = len(self.records)
-            self.records = [r for r in self.records if r.get("id") != record_id]
-            if len(self.records) != orig_len:
-                self._save()
-                return True
+            # Old on-disk histories may already contain duplicate IDs.
+            # Preserve all other entries when deleting the selected record.
+            for idx, rec in enumerate(self.records):
+                if rec.get("id") == record_id:
+                    del self.records[idx]
+                    self._save()
+                    return True
             return False
 
     def clear_history(self) -> bool:
@@ -4250,7 +4253,8 @@ class SiteCredentialVault:
                        username: str = "", password: str = "", token: str = "",
                        cookies: str = "", headers: dict = None, notes: str = "") -> dict:
         with self.lock:
-            c_id = hex(int(time.time() * 1000))[2:]
+            # Creation within the same millisecond must not reuse a vault ID.
+            c_id = uuid.uuid4().hex
             clean_dom = domain.strip().lower()
             if clean_dom.startswith("www."):
                 clean_dom = clean_dom[4:]
@@ -4285,11 +4289,13 @@ class SiteCredentialVault:
 
     def delete_credential(self, cred_id: str) -> bool:
         with self.lock:
-            orig = len(self.credentials)
-            self.credentials = [c for c in self.credentials if c.get("id") != cred_id]
-            if len(self.credentials) != orig:
-                self._save()
-                return True
+            # Older stores may already contain timestamp-ID collisions.
+            # Preserve the other credentials when deleting one.
+            for idx, cred in enumerate(self.credentials):
+                if cred.get("id") == cred_id:
+                    del self.credentials[idx]
+                    self._save()
+                    return True
         return False
 
     def get_headers_for_url(self, url: str) -> dict:
