@@ -25,6 +25,21 @@ import installer_safety as safety
 APP = safety.DEFAULT_APP_NAME
 
 
+class TestF02ExecutableName(unittest.TestCase):
+    def test_executable_filename_matches_build_and_payload(self):
+        # Display name stays stable for HKCU, shortcuts and prior manifests.
+        self.assertEqual(installer_engine.APP_NAME, "Negm Lodaing")
+        self.assertEqual(installer_engine.APP_EXE_FILENAME, "NegmLoading.exe")
+        from pathlib import Path
+        root = Path(__file__).resolve().parent
+        build_spec = (root / "NegmLoading.spec").read_text(encoding="utf-8")
+        packaging = (root / "make_installer_package.py").read_text(encoding="utf-8")
+        self.assertIn("name='NegmLoading'", build_spec)
+        self.assertIn('z.write(exe_path, "NegmLoading.exe")', packaging)
+
+
+
+
 def _write(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     mode = "wb" if isinstance(data, bytes) else "w"
