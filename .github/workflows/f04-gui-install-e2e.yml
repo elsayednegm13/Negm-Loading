@@ -1,0 +1,70 @@
+name: F04 packaged GUI fresh install E2E (disposable Windows runner only)
+
+on:
+  push:
+    branches:
+      - verification/f04-gui-install-e2e-20261104
+    paths:
+      - .github/workflows/f04-gui-install-e2e.yml
+      - .github/scripts/f04_gui_install_smoke.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-gui-install:
+    name: Fresh packaged GUI install, shortcut/registry validation, safe cleanup
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Confirm GitHub-hosted disposable Windows runner
+        shell: cmd
+        run: |
+          if not "%RUNNER_ENVIRONMENT%"=="github-hosted" exit /b 2
+          if not "%RUNNER_OS%"=="Windows" exit /b 2
+          if "%RUNNER_TEMP%"=="" exit /b 2
+      - name: Install repository-pinned build dependencies
+        shell: cmd
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Verify full legacy safety test module
+        shell: cmd
+        run: python -u -m unittest -v test_legacy_migration
+      - name: Compile CI-only GUI harness without changing product code
+        shell: cmd
+        run: python -m compileall -q .github/scripts/f04_gui_install_smoke.py
+      - name: Rebuild app executable from this branch
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading.spec
+      - name: Recreate payload ZIP from fresh app
+        shell: cmd
+        run: python make_installer_package.py
+      - name: Rebuild the packaged Setup.exe from the current payload
+        shell: cmd
+        run: pyinstaller --clean --noconfirm NegmLoading-Setup.spec
+      - name: Recheck actual embedded payload and safe backend ownership
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py
+      - name: Require backend preflight to pass, not a release approval
+        shell: cmd
+        run: python .github/scripts/f02_packaged_probe.py --gate
+      - name: Drive the real GUI install into a runner-temp-only isolated profile
+        shell: cmd
+        run: python .github/scripts/f04_gui_install_smoke.py
+      - name: Preserve verification JSON only; never upload installed app or EXEs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-fresh-gui-install-evidence
+          path: |
+            f02-packaged-build-evidence.json
+            f04-gui-fresh-install-evidence.json
+          if-no-files-found: warn
