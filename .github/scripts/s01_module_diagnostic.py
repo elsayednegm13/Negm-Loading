@@ -16,7 +16,7 @@ OUT = Path("s01-diagnostics")
 TIMEOUT_SEC = 115
 ALLOWED = {
     "test_regression", "test_media_grabber", "test_proxy_vault",
-    "test_web_remote", "test_analytics", "test_queue_system",
+    "test_web_remote", "test_analytics", "test_queue_system", "test_link_recovery",
 }
 
 
