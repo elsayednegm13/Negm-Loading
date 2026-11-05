@@ -33,7 +33,7 @@ class TestWindowsLegacyPipeline(unittest.TestCase):
             data = profile / ".negm_stream"
             data.mkdir()
             (data / "site_credentials.json").write_bytes(
-                b'{"password":"real-test-secret"}'
+                b'[{"id":"a1","domain":"example.org","password":"real-test-secret"}]'
             )
             key = safety.TEST_ANCHOR_PREFIX + "F03Prep" + uuid.uuid4().hex
             run = key + r"\Run"
@@ -89,7 +89,7 @@ class TestWindowsLegacyPipeline(unittest.TestCase):
                 migration.restore_to_new_directory(backup, recovered, crypto)
                 self.assertEqual(
                     (recovered / "user_data" / "site_credentials.json").read_bytes(),
-                    b'{"password":"real-test-secret"}',
+                    b'[{"id":"a1","domain":"example.org","password":"real-test-secret"}]',
                 )
             finally:
                 try:
