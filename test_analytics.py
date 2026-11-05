@@ -84,6 +84,25 @@ class TestAnalyticsEngine(unittest.TestCase):
         self.mgr.clear_history()
         self.assertEqual(len(self.mgr.get_records()), 0)
 
+    def test_history_ids_remain_unique_when_clock_is_frozen(self):
+        # This guards a real collision: multiple records created in one ms
+        # must never share an ID, since deleting one would remove them all.
+        from unittest.mock import patch
+        with patch("nexus_engine.time.time", return_value=1762380800.123):
+            records = [
+                self.mgr.record_download(
+                    DummyTask(f"frozen-{i}.zip", f"https://example.org/{i}.zip")
+                )
+                for i in range(3)
+            ]
+        ids = [record["id"] for record in records]
+        self.assertEqual(len(set(ids)), 3)
+        self.assertTrue(self.mgr.delete_record(ids[0]))
+        self.assertEqual(
+            {record["id"] for record in self.mgr.get_records()},
+            set(ids[1:]),
+        )
+
     def test_summary_and_kpis(self):
         t1 = DummyTask("clip1.mp4", "https://vimeo.com/video1", 10000000)
         t2 = DummyTask("clip2.mp4", "https://vimeo.com/video2", 15000000)
