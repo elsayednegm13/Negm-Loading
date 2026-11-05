@@ -25,6 +25,7 @@ UNINSTALL_CMD_FILENAME = "uninstall.cmd"
 UNINSTALL_PS1_FILENAME = "negmloading-uninstall.ps1"
 MANIFEST_VERSION = 1
 DEFAULT_APP_NAME = "Negm Lodaing"
+DEFAULT_APP_EXE_FILENAME = "NegmLoading.exe"
 DEFAULT_UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Negm Lodaing"
 DEFAULT_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 TEST_ANCHOR_PREFIX = "Software\\NegmLoadingF01Test\\"
@@ -1235,6 +1236,7 @@ def _powershell_uninstaller(app_name, anchor_key=None, run_key=None, shortcut_pa
         quoted.append(_ps_single_quote(os.path.abspath(path)))
     text = _POWERSHELL_TEMPLATE
     text = text.replace("__APP_NAME__", app)
+    text = text.replace("__APP_EXE_FILENAME__", DEFAULT_APP_EXE_FILENAME)
     text = text.replace("__ANCHOR_KEY__", anchor_key)
     text = text.replace("__RUN_KEY__", run_key)
     text = text.replace("__SHORTCUTS__", ", ".join(quoted))
@@ -1544,7 +1546,7 @@ if (-not (Test-Anchor $manifest)) {
 }
 
 try {
-    $AppExeName = $AppName + '.exe'
+    $AppExeName = '__APP_EXE_FILENAME__'
     Get-CimInstance Win32_Process | ForEach-Object {
         $exe = [string]$_.ExecutablePath
         if ([string]::IsNullOrWhiteSpace($exe)) { return }
