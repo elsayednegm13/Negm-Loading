@@ -1389,6 +1389,22 @@ function Test-SafeRelativePath([string]$Rel) {
     return $true
 }
 
+function Get-FileSha256([string]$Path) {
+    # Use the .NET runtime directly so safe uninstall does not depend on
+    # PowerShell module auto-loading (Get-FileHash may be unavailable).
+    $stream = $null
+    $sha = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $digest = $sha.ComputeHash($stream)
+        return ([BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Test-Reparse([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
     $item = Get-Item -LiteralPath $Path -Force
@@ -1566,7 +1582,7 @@ try {
             }
         }
         if ([string]::IsNullOrWhiteSpace($expected)) { return }
-        try { $imageHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() }
+        try { $imageHash = Get-FileSha256 $exe }
         catch { return }
         if ($imageHash -ne $expected) { return }
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -1589,7 +1605,7 @@ foreach ($entry in $fileEntries) {
         if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host 'F02_DIAG file is reparse point or not a leaf' }
         $preserved = $true; continue
     }
-    try { $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() }
+    try { $hash = Get-FileSha256 $full }
     catch {
         if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host ('F02_DIAG hash: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message) }
         $preserved = $true; continue
@@ -1651,7 +1667,7 @@ foreach ($item in $recordedShortcuts) {
         continue
     }
     $hash = ''
-    try { $hash = (Get-FileHash -LiteralPath $lnkPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    try { $hash = Get-FileSha256 $lnkPath }
     catch { $finalFailed = $true; continue }
     $target = ''
     try {
