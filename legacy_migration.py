@@ -356,6 +356,14 @@ def create_verified_backup(plan, backup_root, protect=None):
         stream.flush()
         os.fsync(stream.fileno())
     verify_backup(target, protect)
+    # A newly added file is also data; do not claim a complete snapshot if
+    # the user/application created anything during the backup operation.
+    current = []
+    for area, source_root in plan["roots"].items():
+        current.extend(_walk(source_root, area))
+    current.sort(key=lambda row: (row["area"], row["relpath"]))
+    if current != plan["files"]:
+        raise MigrationBlocked("Legacy files changed during backup")
     return str(target)
 
 
