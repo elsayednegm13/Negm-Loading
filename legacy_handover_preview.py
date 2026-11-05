@@ -145,9 +145,12 @@ def _exclusive_preview_lock(journal_file):
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise legacy.MigrationBlocked("Handover lock is not a regular file")
-        # msvcrt.locking locks a byte region, including on a newly-created file.
-        handle.seek(0)
-        handle.write(b"\\x00")
+        # Initialize the lock region once only. Writing to an already-locked
+        # byte on Windows raises PermissionError before msvcrt.locking can
+        # report the expected nonblocking conflict.
+        if info.st_size == 0:
+            handle.seek(0)
+            handle.write(bytes([0]))
         handle.seek(0)
         try:
             if os.name == "nt":
