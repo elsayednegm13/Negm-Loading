@@ -4105,7 +4105,7 @@ class ProxyManager:
     def add_proxy(self, name: str, protocol: str = "http", host: str = "",
                   port: int = 8080, username: str = "", password: str = "", is_active: bool = False) -> dict:
         with self.lock:
-            p_id = hex(int(time.time() * 1000))[2:]
+            p_id = uuid.uuid4().hex
             if is_active:
                 for p in self.proxies:
                     p["is_active"] = False
