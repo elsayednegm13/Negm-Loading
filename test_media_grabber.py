@@ -103,7 +103,11 @@ class TestMediaGrabberSystem(unittest.TestCase):
 
         # Test submission with custom queue
         init_tasks_count = len(self.app.tasks)
-        dlg._submit(start_now=False)
+        # The submit path requires yt-dlp, but this test verifies queue insertion,
+        # not whether an external downloader is installed on the CI runner.
+        from unittest.mock import patch
+        with patch("ui_dialogs.find_ytdlp_executable", return_value="mock-ytdlp"):
+            dlg._submit(start_now=False)
         self.app.update_idletasks()
 
         self.assertEqual(len(self.app.tasks), init_tasks_count + 1)
