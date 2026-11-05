@@ -167,6 +167,28 @@ class TestHandoverPreview(unittest.TestCase):
             )
         self.assertFalse(self.journal.exists())
 
+    def test_second_process_cannot_enter_locked_transaction(self):
+        self.prepare()
+        with handover._exclusive_preview_lock(self.journal):
+            with self.assertRaises(migration.MigrationBlocked):
+                handover.apply_test_handover(
+                    self.store, self.journal, self.backup, self.crypto
+                )
+            self.assertEqual(
+                self.store.get(self.root, "InstallLocation")["value"],
+                self.old_location,
+            )
+        handover.apply_test_handover(
+            self.store, self.journal, self.backup, self.crypto
+        )
+        self.assertEqual(self.store.get(self.root, "InstallLocation")["value"],
+                         self.new_root)
+        handover.recover_test_handover(
+            self.store, self.journal, self.backup, self.crypto
+        )
+        self.assertEqual(self.store.get(self.root, "InstallLocation")["value"],
+                         self.old_location)
+
     def test_existing_journal_refused_and_tampering_detected(self):
         self.prepare()
         with self.assertRaises(migration.MigrationBlocked):
