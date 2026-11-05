@@ -25,9 +25,9 @@ jobs:
       - name: Install project requirements
         run: python -m pip install -r requirements.txt
       - name: Compile snapshot and test modules
-        run: python -m compileall -q legacy_migration.py legacy_stage.py legacy_upgrade_cli.py legacy_handover_preview.py test_legacy_migration.py test_legacy_stage.py test_legacy_cli.py test_legacy_handover_preview.py
+        run: python -m compileall -q legacy_migration.py legacy_stage.py legacy_upgrade_cli.py legacy_handover_preview.py test_legacy_migration.py test_legacy_stage.py test_legacy_cli.py test_legacy_handover_preview.py legacy_data_compatibility.py test_legacy_data_compatibility.py
       - name: Require all read-only/DPAPI snapshot tests to pass
-        run: python -m unittest -v test_legacy_migration test_legacy_stage test_legacy_cli test_legacy_handover_preview
+        run: python -m unittest -v test_legacy_migration test_legacy_stage test_legacy_cli test_legacy_handover_preview test_legacy_data_compatibility
       - name: Exercise real DPAPI and disposable HKCU migration-preparation pipeline
         run: python -m unittest -v test_legacy_windows_pipeline
       - name: Retain previous fail-closed legacy refusal coverage
@@ -44,4 +44,4 @@ jobs:
         with:
           python-version: '3.13'
       - name: Read-only inventory and injected-cipher fail-closed tests
-        run: python -m unittest -v test_legacy_migration test_legacy_stage test_legacy_cli test_legacy_handover_preview
+        run: python -m unittest -v test_legacy_migration test_legacy_stage test_legacy_cli test_legacy_handover_preview test_legacy_data_compatibility
