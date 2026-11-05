@@ -1,0 +1,98 @@
+name: F02 Windows verification
+
+on:
+  push:
+    branches:
+      - fix/f02-executable-name
+  pull_request:
+    branches:
+      - fix/f01-safe-uninstall
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-safety:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile installer modules
+        run: python -m compileall -q installer_engine.py installer_safety.py test_installer_safety.py
+      - name: Test F02 executable name and launch path
+        run: python -m unittest -v test_installer_safety.TestF02ExecutableName
+      - name: Test installer safety regressions
+        run: python -m unittest -v test_installer_safety
+
+  complete-suite:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Require natural exit from full test process
+        shell: pwsh
+        run: |
+          @'
+          import subprocess
+          import sys
+          try:
+              result = subprocess.run(
+                  [sys.executable, "-u", "run_all_tests.py"],
+                  timeout=240,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              print("FAIL: run_all_tests.py did not exit naturally within 240 seconds", flush=True)
+              sys.exit(124)
+          print(f"Full suite process exit code: {result.returncode}", flush=True)
+          sys.exit(result.returncode)
+          '@ | python -
+
+  packaging-contract:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Build application executable
+        run: python -m PyInstaller --noconfirm --clean NegmLoading.spec
+      - name: Package application
+        run: python make_installer_package.py
+      - name: Verify executable inside payload
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          from zipfile import ZipFile
+          exe = Path("dist/NegmLoading.exe")
+          assert exe.is_file(), "Packaged application executable missing"
+          with ZipFile("payload.zip") as z:
+              assert "NegmLoading.exe" in z.namelist(), "Payload executable name mismatch"
+              assert z.getinfo("NegmLoading.exe").file_size > 0, "Empty executable payload"
+          print("PASS: build and payload use NegmLoading.exe")
+          '@ | python -
+      - name: Build setup executable
+        run: python -m PyInstaller --noconfirm --clean NegmLoading-Setup.spec
+      - name: Verify setup artifact exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/NegmLoading-Setup.exe")) { throw "Setup binary missing" }
+          Get-FileHash "dist/NegmLoading-Setup.exe" -Algorithm SHA256
