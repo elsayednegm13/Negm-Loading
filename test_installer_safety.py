@@ -37,7 +37,38 @@ class TestF02ExecutableName(unittest.TestCase):
         self.assertIn("name='NegmLoading'", build_spec)
         self.assertIn('z.write(exe_path, "NegmLoading.exe")', packaging)
 
+    def test_finish_install_launches_packaged_executable(self):
+        from unittest import mock
+        from types import SimpleNamespace
 
+        with tempfile.TemporaryDirectory() as root:
+            exe = os.path.join(root, installer_engine.APP_EXE_FILENAME)
+            _write(exe, b"test executable placeholder")
+            wizard = SimpleNamespace(
+                chk_launch=SimpleNamespace(get=lambda: True),
+                install_dir=SimpleNamespace(get=lambda: root),
+                destroy=mock.Mock(),
+            )
+            with mock.patch.object(installer_engine.subprocess, "Popen") as popen:
+                installer_engine.SetupWizard.finish_install(wizard)
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], [exe])
+            wizard.destroy.assert_called_once_with()
+
+    def test_finish_install_does_not_launch_missing_executable(self):
+        from unittest import mock
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as root:
+            wizard = SimpleNamespace(
+                chk_launch=SimpleNamespace(get=lambda: True),
+                install_dir=SimpleNamespace(get=lambda: root),
+                destroy=mock.Mock(),
+            )
+            with mock.patch.object(installer_engine.subprocess, "Popen") as popen:
+                installer_engine.SetupWizard.finish_install(wizard)
+            popen.assert_not_called()
+            wizard.destroy.assert_called_once_with()
 
 
 def _write(path, data):
