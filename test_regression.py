@@ -122,6 +122,13 @@ class TestNegmLoadingRegression(unittest.TestCase):
             app.update_idletasks()
             self.assertEqual(app.settings.get("lang"), initial_lang)
 
+            # quick_language schedules UI reconstruction via after(60).
+            # Drain scheduled callbacks before opening another dialog; otherwise
+            # the pending rebuild can destroy a Toplevel during its constructor.
+            rebuild_drained = tk.BooleanVar(master=app, value=False)
+            app.after(150, lambda: rebuild_drained.set(True))
+            app.wait_variable(rebuild_drained)
+
             # Verify table can redraw
             app.table.refresh_viewport()
             app.update_idletasks()
