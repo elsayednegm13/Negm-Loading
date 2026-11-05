@@ -4249,7 +4249,9 @@ class SiteCredentialVault:
                        username: str = "", password: str = "", token: str = "",
                        cookies: str = "", headers: dict = None, notes: str = "") -> dict:
         with self.lock:
-            c_id = hex(int(time.time() * 1000))[2:]
+            # Avoid deleting multiple credentials added during the same millisecond.
+            # Existing persisted IDs are left unchanged.
+            c_id = uuid.uuid4().hex
             clean_dom = domain.strip().lower()
             if clean_dom.startswith("www."):
                 clean_dom = clean_dom[4:]
