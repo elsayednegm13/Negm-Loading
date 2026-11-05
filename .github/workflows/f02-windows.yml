@@ -101,6 +101,8 @@ jobs:
       - name: Reject legacy untrusted uninstall without modifying user files
         run: python -m unittest -v test_legacy_upgrade_guard
       - name: Smoke install upgrade and safe-uninstall packaged payload in temporary test scope
+        env:
+          F02_UNINSTALL_DIAGNOSTICS: '1'
         run: python -m unittest -v test_packaged_smoke
       - name: Verify real setup GUI opens and closes without installation
         run: python -m unittest -v test_setup_window_smoke
