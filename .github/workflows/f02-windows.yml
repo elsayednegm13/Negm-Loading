@@ -108,6 +108,11 @@ jobs:
         run: python -m unittest -v test_setup_window_smoke
       - name: Exercise GUI wizard install upgrade and safe uninstall with disposable HKCU
         run: python -m unittest -v test_setup_wizard_flow
+      - name: Exercise REAL packaged setup EXE install upgrade and uninstall on fresh CI VM
+        timeout-minutes: 9
+        env:
+          NEGM_PACKAGED_E2E_ALLOW: isolated-ephemeral-vm
+        run: python -m unittest -v test_packaged_setup_e2e
 
   ui-diagnostics:
     runs-on: windows-2022
