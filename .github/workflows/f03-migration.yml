@@ -28,6 +28,8 @@ jobs:
         run: python -m compileall -q legacy_migration.py legacy_stage.py legacy_upgrade_cli.py test_legacy_migration.py test_legacy_stage.py test_legacy_cli.py
       - name: Require all read-only/DPAPI snapshot tests to pass
         run: python -m unittest -v test_legacy_migration test_legacy_stage test_legacy_cli
+      - name: Exercise real DPAPI and disposable HKCU migration-preparation pipeline
+        run: python -m unittest -v test_legacy_windows_pipeline
       - name: Retain previous fail-closed legacy refusal coverage
         run: python -m unittest -v test_legacy_upgrade_guard
       - name: Require installer filename contract unchanged
