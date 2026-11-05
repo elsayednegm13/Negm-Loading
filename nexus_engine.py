@@ -3659,7 +3659,9 @@ class DownloadHistoryManager:
 
     def record_download(self, task, status: str = "completed", error_msg: str = "", duration_sec: float = 0.0) -> dict:
         with self.lock:
-            rec_id = hex(int(time.time() * 1000))[2:]
+            # Millisecond timestamps collide on fast back-to-back completions.
+            # UUIDs preserve existing saved IDs while keeping new deletes exact.
+            rec_id = uuid.uuid4().hex
             filename = getattr(task, "filename", "") or "unknown_file"
             url = getattr(task, "url", "") or ""
             save_path = getattr(task, "save_path", "") or ""
