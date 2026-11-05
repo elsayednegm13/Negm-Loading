@@ -30,6 +30,10 @@ class TestF02ExecutableName(unittest.TestCase):
         # Display name stays stable for HKCU, shortcuts and prior manifests.
         self.assertEqual(installer_engine.APP_NAME, "Negm Lodaing")
         self.assertEqual(installer_engine.APP_EXE_FILENAME, "NegmLoading.exe")
+        self.assertEqual(safety.DEFAULT_APP_EXE_FILENAME, installer_engine.APP_EXE_FILENAME)
+        script = safety._powershell_uninstaller(installer_engine.APP_NAME)
+        self.assertIn("$AppExeName = 'NegmLoading.exe'", script)
+        self.assertNotIn("__APP_EXE_FILENAME__", script)
         from pathlib import Path
         root = Path(__file__).resolve().parent
         build_spec = (root / "NegmLoading.spec").read_text(encoding="utf-8")
