@@ -77,6 +77,15 @@ class TestSetupWizardFlow(unittest.TestCase):
                             )
                         finally:
                             if wizard.winfo_exists():
+                                # A CTk root schedules polling callbacks (DPI,
+                                # scaling and widget updates). After quit(), stop
+                                # those pending test-root callbacks before destroy
+                                # so they cannot fire against deleted Tcl commands.
+                                for after_id in wizard.tk.call("after", "info"):
+                                    try:
+                                        wizard.after_cancel(after_id)
+                                    except Exception:
+                                        pass
                                 wizard.destroy()
 
                     installed_exe = dest / engine.APP_EXE_FILENAME
