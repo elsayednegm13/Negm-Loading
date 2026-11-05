@@ -98,8 +98,12 @@ jobs:
         run: |
           if (-not (Test-Path "dist/NegmLoading-Setup.exe")) { throw "Setup binary missing" }
           Get-FileHash "dist/NegmLoading-Setup.exe" -Algorithm SHA256
+      - name: Reject legacy untrusted uninstall without modifying user files
+        run: python -m unittest -v test_legacy_upgrade_guard
       - name: Smoke install upgrade and safe-uninstall packaged payload in temporary test scope
         run: python -m unittest -v test_packaged_smoke
+      - name: Verify real setup GUI opens and closes without installation
+        run: python -m unittest -v test_setup_window_smoke
 
   ui-diagnostics:
     runs-on: windows-2022
