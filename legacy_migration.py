@@ -97,10 +97,21 @@ def _no_reparse_ancestors(path):
 
 
 def _inside(left, right):
-    """Whether right is inside left (including the root itself)."""
+    """True for an equal path or a child, with a component boundary.
+
+    On Windows path spelling/case and commonpath can be surprising. Both
+    operands are first normalized using ntpath/os.path semantics; the
+    separator boundary prevents matching C:\\Program with C:\\ProgramOther.
+    """
     try:
-        return os.path.commonpath([_canonical(left), _canonical(right)]) == _canonical(left)
-    except (ValueError, OSError):
+        parent = _canonical(left).rstrip("\\\\/")
+        child = _canonical(right).rstrip("\\\\/")
+        if not parent or not child:
+            return False
+        if child == parent:
+            return True
+        return child.startswith(parent + os.sep)
+    except (ValueError, OSError, TypeError):
         return False
 
 
