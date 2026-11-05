@@ -98,6 +98,8 @@ jobs:
         run: |
           if (-not (Test-Path "dist/NegmLoading-Setup.exe")) { throw "Setup binary missing" }
           Get-FileHash "dist/NegmLoading-Setup.exe" -Algorithm SHA256
+      - name: Smoke install upgrade and safe-uninstall packaged payload in temporary test scope
+        run: python -m unittest -v test_packaged_smoke
 
   ui-diagnostics:
     runs-on: windows-2022
@@ -137,4 +139,51 @@ jobs:
                   print(f"DIAGNOSTIC TIMEOUT: {test}", flush=True)
                   failed = True
           sys.exit(1 if failed else 0)
+          '@ | python -
+
+  suite-module-isolation:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Require each test module to finish with a natural exit
+        shell: pwsh
+        run: |
+          @'
+          import subprocess
+          import sys
+          modules = [
+              "test_installer_safety",
+              "test_regression",
+              "test_queue_system",
+              "test_site_grabber",
+              "test_media_grabber",
+              "test_analytics",
+              "test_link_recovery",
+              "test_proxy_vault",
+              "test_web_remote",
+              "test_stress_profiling",
+          ]
+          failures = []
+          for module in modules:
+              print(f"MODULE START: {module}", flush=True)
+              try:
+                  result = subprocess.run(
+                      [sys.executable, "-u", "-m", "unittest", "-v", module],
+                      check=False, timeout=120,
+                  )
+                  print(f"MODULE EXIT: {module}: {result.returncode}", flush=True)
+                  if result.returncode != 0:
+                      failures.append(module)
+              except subprocess.TimeoutExpired:
+                  print(f"MODULE TIMEOUT: {module}", flush=True)
+                  failures.append(module)
+          print("MODULE FAILURES:", failures, flush=True)
+          sys.exit(1 if failures else 0)
           '@ | python -
