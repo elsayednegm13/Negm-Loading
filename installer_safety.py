@@ -1729,6 +1729,12 @@ try {
                     $targetsUs = $true
                 }
             }
+            if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') {
+                $isInRoot = [bool](Test-WithinRoot $exePath)
+                $leafMatches = ([StringComparer]::OrdinalIgnoreCase.Compare([IO.Path]::GetFileName($exePath), $AppExeName) -eq 0)
+                $parentMatches = ([StringComparer]::OrdinalIgnoreCase.Compare([IO.Path]::GetDirectoryName($exePath).TrimEnd('\'), [IO.Path]::GetFullPath($Root).TrimEnd('\')) -eq 0)
+                Write-Host ('F02_DIAG startup: value-present=1 within-root=' + $isInRoot + ' leaf-matches=' + $leafMatches + ' parent-matches=' + $parentMatches + ' owned=' + $targetsUs)
+            }
             if ($targetsUs) { $run.DeleteValue($AppName, $false) }
         }
         $run.Close()
