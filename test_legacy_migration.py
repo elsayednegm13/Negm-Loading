@@ -154,10 +154,18 @@ class TestLegacyMigration(unittest.TestCase):
 
     def test_refuse_backup_inside_install_or_profile_data(self):
         plan = self.plan()
-        for proposed in (self.old / "backup", self.data / "backup"):
-            with self.assertRaises(migration.MigrationBlocked):
-                migration.create_verified_backup(plan, proposed, FakeProtector())
-            self.assertFalse(proposed.exists())
+        for proposed, area in ((self.old / "backup", "app"),
+                               (self.data / "backup", "user_data")):
+            with self.subTest(area=area):
+                self.assertTrue(migration._inside(plan["roots"][area], proposed))
+                with self.assertRaises(migration.MigrationBlocked):
+                    migration.create_verified_backup(plan, proposed, FakeProtector())
+                self.assertFalse(proposed.exists())
+
+    def test_containment_requires_exact_directory_boundary(self):
+        sibling = self.base / "Old Installation Other" / "backup"
+        self.assertFalse(migration._inside(self.old, sibling))
+        self.assertTrue(migration._inside(self.old, self.old / "backup"))
 
     def test_symlink_inside_old_tree_is_never_followed(self):
         victim = self.base / "external-secret.txt"
