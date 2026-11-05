@@ -130,11 +130,10 @@ class TestPhase11Dialogs(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if cls.app is not None:
-            try:
-                cls.app.is_closing = True
-                cls.app.destroy()
-            except Exception:
-                pass
+            # Close native tray and bridge threads before Tk is destroyed.
+            # Setting is_closing directly bypasses the application's cleanup.
+            cls.app.force_exit = True
+            cls.app.on_close()
 
     def setUp(self):
         if self.app is None:
