@@ -1721,19 +1721,20 @@ try {
             $targetsUs = $false
             if ($exePath -and (Test-WithinRoot $exePath)) {
                 $leaf = [IO.Path]::GetFileName($exePath)
-                $parent = [IO.Path]::GetDirectoryName($exePath)
-                $rootCmp = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-                if ($parent -and
-                    ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, $AppExeName) -eq 0) -and
-                    ([StringComparer]::OrdinalIgnoreCase.Compare($parent.TrimEnd('\'), $rootCmp) -eq 0)) {
+                # Compare the complete, canonical file paths rather than the
+                # parent directory's raw spelling; do not adopt nested paths.
+                $actualExe = [IO.Path]::GetFullPath($exePath)
+                $expectedExe = [IO.Path]::GetFullPath((Join-Path $Root $AppExeName))
+                if (([StringComparer]::OrdinalIgnoreCase.Compare($leaf, $AppExeName) -eq 0) -and
+                    ([StringComparer]::OrdinalIgnoreCase.Compare($actualExe, $expectedExe) -eq 0)) {
                     $targetsUs = $true
                 }
             }
             if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') {
                 $isInRoot = [bool](Test-WithinRoot $exePath)
                 $leafMatches = ([StringComparer]::OrdinalIgnoreCase.Compare([IO.Path]::GetFileName($exePath), $AppExeName) -eq 0)
-                $parentMatches = ([StringComparer]::OrdinalIgnoreCase.Compare([IO.Path]::GetDirectoryName($exePath).TrimEnd('\'), [IO.Path]::GetFullPath($Root).TrimEnd('\')) -eq 0)
-                Write-Host ('F02_DIAG startup: value-present=1 within-root=' + $isInRoot + ' leaf-matches=' + $leafMatches + ' parent-matches=' + $parentMatches + ' owned=' + $targetsUs)
+                $exactMatch = ([StringComparer]::OrdinalIgnoreCase.Compare([IO.Path]::GetFullPath($exePath), [IO.Path]::GetFullPath((Join-Path $Root $AppExeName))) -eq 0)
+                Write-Host ('F02_DIAG startup: value-present=1 within-root=' + $isInRoot + ' leaf-matches=' + $leafMatches + ' exact-path=' + $exactMatch + ' owned=' + $targetsUs)
             }
             if ($targetsUs) { $run.DeleteValue($AppName, $false) }
         }
