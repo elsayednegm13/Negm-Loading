@@ -126,6 +126,24 @@ class TestLegacyMigration(unittest.TestCase):
         with self.assertRaises(migration.MigrationBlocked):
             migration.create_verified_backup(plan, backup, protect)
 
+    def test_snapshot_refuses_new_files_created_during_backup(self):
+        plan = self.plan()
+        added = self.data / 'new-file-during-backup.txt'
+        class NewFileDuringBackup(FakeProtector):
+            injected = False
+            def encrypt(self, data):
+                if not self.injected:
+                    self.injected = True
+                    added.write_text('KEEP ME', encoding='utf-8')
+                return super().encrypt(data)
+        with self.assertRaises(migration.MigrationBlocked):
+            migration.create_verified_backup(
+                plan, self.base / 'Inconsistent snapshot',
+                NewFileDuringBackup()
+            )
+        self.assertEqual(added.read_text(encoding='utf-8'), 'KEEP ME')
+        self.assertTrue(self.old_exe.exists())
+
     def test_backup_detects_modified_source_and_never_overwrites(self):
         plan = self.plan()
         self.data.joinpath("settings.json").write_text(
