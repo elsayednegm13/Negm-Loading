@@ -950,39 +950,38 @@ class TestWindowsUninstallChain(unittest.TestCase):
     def test_cmd_anchor_delete_denied_keeps_manifest(self):
         if os.name != "nt":
             self.skipTest("Windows uninstall.cmd chain")
-        # An ACL deny test requires the PowerShell Security module to load.
-        # A runner without that module cannot establish the test precondition.
-        probe = subprocess.run(
-            [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
-             "$ErrorActionPreference = 'Stop'; Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; "
-             "Get-Command Get-Acl -ErrorAction Stop | Out-Null; "
-             "Get-Command Set-Acl -ErrorAction Stop | Out-Null"],
-            capture_output=True, text=True,
-        )
-        if probe.returncode != 0:
-            self.skipTest("PowerShell Security module unavailable; registry ACL denial NOT TESTED")
+        # Use RegistryKey ACL APIs directly. This does not depend on Get-Acl /
+        # Set-Acl module auto-loading and operates only on a unique test key.
         import winreg
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "Negm Lodaing Install")
             os.makedirs(root)
             key = _install_owned(root, {"owned.exe": b"payload"})
             env = os.environ.copy()
-            env["F01_KEY"] = "HKCU:\\" + key
+            env["F01_KEY"] = key
+            script_head = (
+                "$ErrorActionPreference = 'Stop'; "
+                "$rights = [Security.AccessControl.RegistryRights]::ChangePermissions -bor "
+                "[Security.AccessControl.RegistryRights]::ReadPermissions; "
+                "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("
+                "$env:F01_KEY, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights); "
+                "if ($null -eq $k) { throw 'Test registry key unavailable' }; "
+                "try { $acl = $k.GetAccessControl(); "
+                "$who = [Security.Principal.WindowsIdentity]::GetCurrent().User; "
+                "$rule = [Security.AccessControl.RegistryAccessRule]::new("
+                "$who, [Security.AccessControl.RegistryRights]::Delete, "
+                "[Security.AccessControl.InheritanceFlags]::None, "
+                "[Security.AccessControl.PropagationFlags]::None, "
+                "[Security.AccessControl.AccessControlType]::Deny); "
+            )
+            deny_script = script_head + "$acl.AddAccessRule($rule); $k.SetAccessControl($acl) } finally { $k.Dispose() }"
+            restore_script = script_head + "$acl.RemoveAccessRuleSpecific($rule); $k.SetAccessControl($acl) } finally { $k.Dispose() }"
             deny = subprocess.run(
-                [_powershell_exe(), "-NoProfile", "-Command",
-                 "$ErrorActionPreference = 'Stop'; "
-                 "$acl = Get-Acl $env:F01_KEY; "
-                 "$who = [Security.Principal.WindowsIdentity]::GetCurrent().Name; "
-                 "$rule = New-Object Security.AccessControl.RegistryAccessRule("
-                 "$who, [Security.AccessControl.RegistryRights]::Delete, "
-                 "[Security.AccessControl.InheritanceFlags]::None, "
-                 "[Security.AccessControl.PropagationFlags]::None, "
-                 "[Security.AccessControl.AccessControlType]::Deny); "
-                 "$acl.AddAccessRule($rule); Set-Acl $env:F01_KEY $acl"],
+                [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", deny_script],
                 env=env, capture_output=True, text=True,
             )
-            self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
             try:
+                self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
                 proc = _run_uninstall_cmd(root)
                 self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
                 self.assertIn("retry is possible", (proc.stdout or "").lower())
@@ -991,13 +990,11 @@ class TestWindowsUninstallChain(unittest.TestCase):
                 self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
                 winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
             finally:
-                subprocess.run(
-                    [_powershell_exe(), "-NoProfile", "-Command",
-                     "$acl = Get-Acl $env:F01_KEY; "
-                     "$acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' } | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }; "
-                     "Set-Acl $env:F01_KEY $acl"],
+                restore = subprocess.run(
+                    [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", restore_script],
                     env=env, capture_output=True, text=True,
                 )
+                self.assertEqual(restore.returncode, 0, restore.stdout + restore.stderr)
             again = _run_uninstall_cmd(root)
             self.assertEqual(again.returncode, safety.EXIT_OK, again.stdout + again.stderr)
 
