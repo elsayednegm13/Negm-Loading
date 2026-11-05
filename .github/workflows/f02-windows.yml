@@ -98,3 +98,43 @@ jobs:
         run: |
           if (-not (Test-Path "dist/NegmLoading-Setup.exe")) { throw "Setup binary missing" }
           Get-FileHash "dist/NegmLoading-Setup.exe" -Algorithm SHA256
+
+  ui-diagnostics:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Diagnose UI and media tests in isolated subprocesses
+        shell: pwsh
+        run: |
+          @'
+          import subprocess
+          import sys
+          failed = False
+          tests = [
+              "test_regression.TestNegmLoadingRegression.test_04_app_headless_lifecycle",
+              "test_media_grabber.TestMediaGrabberSystem.test_04_stream_badge_and_mock_analysis",
+              "test_proxy_vault.TestProxyManager.test_proxy_crud_and_active_selection",
+          ]
+          for test in tests:
+              print(f"DIAGNOSTIC START: {test}", flush=True)
+              try:
+                  result = subprocess.run(
+                      [sys.executable, "-u", "-m", "unittest", "-v", test],
+                      timeout=90,
+                      check=False,
+                  )
+                  print(f"DIAGNOSTIC EXIT: {test}: {result.returncode}", flush=True)
+                  if result.returncode != 0:
+                      failed = True
+              except subprocess.TimeoutExpired:
+                  print(f"DIAGNOSTIC TIMEOUT: {test}", flush=True)
+                  failed = True
+          sys.exit(1 if failed else 0)
+          '@ | python -
