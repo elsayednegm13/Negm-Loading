@@ -56,8 +56,10 @@ class WindowsDPAPI:
         self.kernel.LocalFree.restype = ctypes.c_void_p
 
     def _apply(self, data: bytes, encrypt: bool) -> bytes:
-        if len(data) > CHUNK_BYTES + 4096:
-            raise MigrationBlocked("DPAPI input chunk exceeds limit")
+        # Small payload chunks are streamed; the encrypted index can contain
+        # metadata for many files and has a separately bounded memory budget.
+        if len(data) > 16 * 1024 * 1024:
+            raise MigrationBlocked("DPAPI input exceeds bounded snapshot limit")
         buf = (ctypes.c_ubyte * max(1, len(data)))()
         if data:
             ctypes.memmove(buf, data, len(data))
@@ -303,6 +305,8 @@ def _read_encrypted_file(path, protect):
 def _index_from_backup(backup_root, protect):
     index_file = Path(backup_root) / INDEX_NAME
     _checked_file(index_file)
+    if index_file.stat().st_size > 17 * 1024 * 1024:
+        raise MigrationBlocked("Encrypted index size exceeds policy")
     raw = index_file.read_bytes()
     try:
         doc = json.loads(protect.decrypt(raw).decode("utf-8"))
