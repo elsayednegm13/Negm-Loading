@@ -244,5 +244,93 @@ class TestRealPackagedSetupE2E(unittest.TestCase):
             print("Packaged setup E2E: install/upgrade/uninstall passed.", flush=True)
 
 
+    @unittest.skipUnless(os.name == "nt", "Windows GUI only")
+    def test_packaged_exe_refuses_untrusted_legacy_folder(self):
+        # The legacy script is inert test data. It is NEVER executed.
+        self.assertEqual(os.environ.get("GITHUB_ACTIONS"), "true")
+        self.assertEqual(os.environ.get("RUNNER_ENVIRONMENT"), "github-hosted")
+        self.assertEqual(os.environ.get("NEGM_PACKAGED_E2E_ALLOW"),
+                         "isolated-ephemeral-vm")
+        import winreg
+
+        with self.assertRaises(FileNotFoundError):
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
+        runner_temp = os.environ["RUNNER_TEMP"]
+        setup = Path("dist/NegmLoading-Setup.exe").resolve()
+        self.assertTrue(setup.is_file())
+        user32 = _open_user32()
+        self.assertFalse(user32.FindWindowW(None, TITLE))
+        with tempfile.TemporaryDirectory(prefix="ne-legacy-refusal-", dir=runner_temp) as tmp:
+            base = Path(tmp)
+            local = base / "Local"
+            profile = base / "Profile"
+            roaming = base / "Roaming"
+            temp_child = base / "Temp"
+            for directory in (local, profile / "Desktop", roaming, temp_child):
+                directory.mkdir(parents=True, exist_ok=True)
+            legacy = local / "Programs" / APP
+            legacy.mkdir(parents=True)
+            old_script = legacy / "uninstall.cmd"
+            old_script.write_bytes(b'@echo off\r\nrd /s /q "%~dp0"\r\n')
+            old_exe = legacy / "Negm Lodaing.exe"
+            old_exe.write_bytes(b"old executable placeholder")
+            inside = legacy / "user-important.txt"
+            inside.write_text("PRESERVE OLD USER DATA", encoding="utf-8")
+            outside = base / "other-user-data.txt"
+            outside.write_text("KEEP OUTSIDE TOO", encoding="utf-8")
+            watched = [old_script, old_exe, inside, outside]
+            old_hashes = [_sha(p) for p in watched]
+            env = os.environ.copy()
+            env.update({
+                "LOCALAPPDATA": str(local),
+                "USERPROFILE": str(profile),
+                "APPDATA": str(roaming),
+                "TEMP": str(temp_child),
+                "TMP": str(temp_child),
+            })
+            proc = subprocess.Popen(
+                [str(setup)], env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_until(
+                    lambda: bool(user32.FindWindowW(None, TITLE)) or proc.poll() is not None,
+                    100, "legacy refusal setup window",
+                )
+                hwnd = user32.FindWindowW(None, TITLE)
+                self.assertTrue(hwnd, "Legacy refusal test setup failed to open")
+                _wait_until(lambda: user32.IsWindowVisible(hwnd), 15, "visible legacy test setup")
+                time.sleep(2)
+                _click_next(user32, hwnd)
+                time.sleep(1)
+                _click_next(user32, hwnd)
+                # The preflight rejection is synchronous and precedes any write.
+                time.sleep(4)
+                self.assertEqual([_sha(p) for p in watched], old_hashes)
+                self.assertEqual(
+                    sorted(p.name for p in legacy.iterdir()),
+                    sorted(["uninstall.cmd", "Negm Lodaing.exe", "user-important.txt"]),
+                )
+                self.assertFalse((legacy / APP_EXE).exists())
+                self.assertFalse((legacy / "negmloading-install-manifest.json").exists())
+                with self.assertRaises(FileNotFoundError):
+                    winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
+                self.assertTrue(user32.PostMessageW(hwnd, WM_CLOSE, 0, 0))
+                proc.wait(timeout=30)
+                self.assertEqual(proc.returncode, 0)
+                print("Packaged setup refused untrusted legacy folder without writes.", flush=True)
+            finally:
+                if proc.poll() is None:
+                    hwnd = user32.FindWindowW(None, TITLE)
+                    if hwnd:
+                        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=15)
+
+
+
 if __name__ == "__main__":
     unittest.main()
