@@ -1724,7 +1724,7 @@ try {
                 $parent = [IO.Path]::GetDirectoryName($exePath)
                 $rootCmp = [IO.Path]::GetFullPath($Root).TrimEnd('\')
                 if ($parent -and
-                    ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, ($AppName + '.exe')) -eq 0) -and
+                    ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, $AppExeName) -eq 0) -and
                     ([StringComparer]::OrdinalIgnoreCase.Compare($parent.TrimEnd('\'), $rootCmp) -eq 0)) {
                     $targetsUs = $true
                 }
