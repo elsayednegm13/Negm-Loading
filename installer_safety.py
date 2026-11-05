@@ -1580,13 +1580,28 @@ foreach ($entry in $fileEntries) {
     $rel = [string]$entry.path
     if ($Recovery -contains $rel) { continue }
     $expect = ([string]$entry.sha256).ToLowerInvariant()
-    try { $full = Resolve-Owned $rel } catch { $preserved = $true; continue }
+    try { $full = Resolve-Owned $rel } catch {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host ('F02_DIAG resolve-owned: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message) }
+        $preserved = $true; continue
+    }
     if (-not (Test-Path -LiteralPath $full)) { continue }
-    if ((Test-Reparse $full) -or -not (Test-Path -LiteralPath $full -PathType Leaf)) { $preserved = $true; continue }
+    if ((Test-Reparse $full) -or -not (Test-Path -LiteralPath $full -PathType Leaf)) {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host 'F02_DIAG file is reparse point or not a leaf' }
+        $preserved = $true; continue
+    }
     try { $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() }
-    catch { $preserved = $true; continue }
-    if ($hash -ne $expect) { $preserved = $true; continue }
-    try { [IO.File]::Delete($full) } catch { $preserved = $true }
+    catch {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host ('F02_DIAG hash: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message) }
+        $preserved = $true; continue
+    }
+    if ($hash -ne $expect) {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host 'F02_DIAG hash mismatch' }
+        $preserved = $true; continue
+    }
+    try { [IO.File]::Delete($full) } catch {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host ('F02_DIAG delete: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message) }
+        $preserved = $true
+    }
 }
 if ($preserved) {
     Write-Host 'MANUAL CLEANUP REQUIRED: owned files were preserved. Manifest and uninstall scripts were kept. Exit code 3.'
