@@ -17,6 +17,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 
 import installer_safety as safety
@@ -122,6 +124,50 @@ def _check_name(name):
         raise legacy.MigrationBlocked("Invalid registry value name")
 
 
+
+@contextmanager
+def _exclusive_preview_lock(journal_file):
+    """Nonblocking per-journal OS lock; automatically released after process exit.
+
+    The lock file is deliberately retained so another process never mistakes
+    deletion/re-creation for a released OS lock. The preview never uses a
+    production uninstall key and does not claim inter-process ownership of
+    the real application.
+    """
+    lock_path = Path(str(Path(journal_file)) + ".lock")
+    legacy._no_reparse_ancestors(lock_path.parent)
+    if os.path.lexists(lock_path):
+        legacy._checked_file(lock_path)
+    descriptor = os.open(
+        lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600
+    )
+    with os.fdopen(descriptor, "r+b", buffering=0) as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise legacy.MigrationBlocked("Handover lock is not a regular file")
+        # msvcrt.locking locks a byte region, including on a newly-created file.
+        handle.seek(0)
+        handle.write(b"\\x00")
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError) as exc:
+            raise legacy.MigrationBlocked(
+                "Another handover holds the journal lock"
+            ) from exc
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
 def _journal(journal_file, crypto, store, backup_root):
     path = Path(journal_file)
     legacy._no_reparse_ancestors(path)
@@ -198,11 +244,15 @@ def prepare_test_journal(store, changes, journal_file, backup_root, crypto):
         json.dumps(doc, sort_keys=True, ensure_ascii=False).encode("utf-8"))
     if len(cipher) > 1024 * 1024:
         raise legacy.MigrationBlocked("Encrypted journal exceeds limit")
-    with open(path, "xb") as output:
-        output.write(cipher)
-        output.flush()
-        os.fsync(output.fileno())
-    _journal(path, crypto, store, backup_root)
+    with _exclusive_preview_lock(path):
+        # Recheck under the OS lock to prevent overlapping preparations.
+        if os.path.lexists(path):
+            raise legacy.MigrationBlocked("Journal already exists")
+        with open(path, "xb") as output:
+            output.write(cipher)
+            output.flush()
+            os.fsync(output.fileno())
+        _journal(path, crypto, store, backup_root)
     return str(path)
 
 
@@ -215,8 +265,7 @@ def _states(doc, store, allowed):
                 "Registry changed outside handover journal; refusing overwrite")
 
 
-def recover_test_handover(store, journal_file, backup_root, crypto):
-    """Restore known old values, preserving any foreign edits and the WAL."""
+def _recover_test_handover_unlocked(store, journal_file, backup_root, crypto):
     doc = _journal(journal_file, crypto, store, backup_root)
     _states(doc, store, lambda op: (op["before"], op["after"]))
     for op in reversed(doc["operations"]):
@@ -227,21 +276,33 @@ def recover_test_handover(store, journal_file, backup_root, crypto):
     return "RESTORED_TEST_SCOPE"
 
 
+def recover_test_handover(store, journal_file, backup_root, crypto):
+    """Recover under the OS journal lock; a foreign edit blocks overwrite."""
+    with _exclusive_preview_lock(journal_file):
+        return _recover_test_handover_unlocked(
+            store, journal_file, backup_root, crypto
+        )
+
+
 def apply_test_handover(store, journal_file, backup_root, crypto,
                         before_write=None):
     """Fault-injectable test only: no production key can pass the scope gate."""
-    doc = _journal(journal_file, crypto, store, backup_root)
-    _states(doc, store, lambda op: (op["before"], op["after"]))
-    try:
-        for index, op in enumerate(doc["operations"]):
-            current = _value(store.get(op["key"], op["name"]))
-            if current == op["before"]:
-                if before_write is not None:
-                    before_write(index)
-                store.set(op["key"], op["name"], op["after"])
-        _states(doc, store, lambda op: (op["after"],))
-    except Exception:
-        # If recovery also fails, leave the WAL in place for manual retry.
-        recover_test_handover(store, journal_file, backup_root, crypto)
-        raise
+    with _exclusive_preview_lock(journal_file):
+        doc = _journal(journal_file, crypto, store, backup_root)
+        _states(doc, store, lambda op: (op["before"], op["after"]))
+        try:
+            for index, op in enumerate(doc["operations"]):
+                current = _value(store.get(op["key"], op["name"]))
+                if current == op["before"]:
+                    if before_write is not None:
+                        before_write(index)
+                    store.set(op["key"], op["name"], op["after"])
+            _states(doc, store, lambda op: (op["after"],))
+        except Exception:
+            # If recovery also fails, the encrypted WAL survives for manual
+            # retry after the lock is released.
+            _recover_test_handover_unlocked(
+                store, journal_file, backup_root, crypto
+            )
+            raise
     return "TEST_ONLY_APPLIED_NOT_PRODUCTION_ACTIVATION"
