@@ -7,6 +7,7 @@ import zipfile
 
 import installer_safety as safety
 import legacy_migration as legacy
+import legacy_data_compatibility as compat
 
 
 def prepare_staging(plan, backup_dir, payload_zip, staging_dir,
@@ -33,6 +34,9 @@ def prepare_staging(plan, backup_dir, payload_zip, staging_dir,
     all_files.sort(key=lambda f: (f["area"], f["relpath"]))
     if all_files != plan["files"]:
         raise legacy.MigrationBlocked("Source files changed after the snapshot")
+    # The application can default silently when old JSON is malformed. That is
+    # unsafe for migration: fail before writing even the staging directory.
+    compat_report = compat.assess_user_data(plan)
 
     destination = Path(os.path.abspath(staging_dir))
     legacy._no_reparse_ancestors(destination.parent)
@@ -78,4 +82,5 @@ def prepare_staging(plan, backup_dir, payload_zip, staging_dir,
     if digest != expected.hexdigest():
         raise legacy.MigrationBlocked("Staged executable failed package hash check")
     return {"status": "STAGED_ONLY", "path": str(destination),
-            "exe_sha256": digest, "registry_changed": False}
+            "exe_sha256": digest, "registry_changed": False,
+            "data_schema_check": compat_report["status"]}
