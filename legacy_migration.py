@@ -86,7 +86,11 @@ class WindowsDPAPI:
 
 
 def _canonical(path):
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    # A Windows profile/temp alias may resolve to a different spelling than the
+    # inventory root (even when both address the same directory). Canonicalize
+    # the existing prefix before applying ownership/overlap comparisons.
+    value = os.path.abspath(os.fspath(path))
+    return os.path.normcase(os.path.normpath(os.path.realpath(value)))
 
 
 def _no_reparse_ancestors(path):
