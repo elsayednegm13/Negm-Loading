@@ -3659,7 +3659,9 @@ class DownloadHistoryManager:
 
     def record_download(self, task, status: str = "completed", error_msg: str = "", duration_sec: float = 0.0) -> dict:
         with self.lock:
-            rec_id = hex(int(time.time() * 1000))[2:]
+            # Millisecond timestamps collide on fast back-to-back completions.
+            # UUIDs preserve existing saved IDs while keeping new deletes exact.
+            rec_id = uuid.uuid4().hex
             filename = getattr(task, "filename", "") or "unknown_file"
             url = getattr(task, "url", "") or ""
             save_path = getattr(task, "save_path", "") or ""
@@ -4105,7 +4107,7 @@ class ProxyManager:
     def add_proxy(self, name: str, protocol: str = "http", host: str = "",
                   port: int = 8080, username: str = "", password: str = "", is_active: bool = False) -> dict:
         with self.lock:
-            p_id = hex(int(time.time() * 1000))[2:]
+            p_id = uuid.uuid4().hex
             if is_active:
                 for p in self.proxies:
                     p["is_active"] = False
@@ -4247,7 +4249,9 @@ class SiteCredentialVault:
                        username: str = "", password: str = "", token: str = "",
                        cookies: str = "", headers: dict = None, notes: str = "") -> dict:
         with self.lock:
-            c_id = hex(int(time.time() * 1000))[2:]
+            # Avoid deleting multiple credentials added during the same millisecond.
+            # Existing persisted IDs are left unchanged.
+            c_id = uuid.uuid4().hex
             clean_dom = domain.strip().lower()
             if clean_dom.startswith("www."):
                 clean_dom = clean_dom[4:]

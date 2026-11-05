@@ -25,6 +25,7 @@ UNINSTALL_CMD_FILENAME = "uninstall.cmd"
 UNINSTALL_PS1_FILENAME = "negmloading-uninstall.ps1"
 MANIFEST_VERSION = 1
 DEFAULT_APP_NAME = "Negm Lodaing"
+DEFAULT_APP_EXE_FILENAME = "NegmLoading.exe"
 DEFAULT_UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Negm Lodaing"
 DEFAULT_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 TEST_ANCHOR_PREFIX = "Software\\NegmLoadingF01Test\\"
@@ -1235,6 +1236,7 @@ def _powershell_uninstaller(app_name, anchor_key=None, run_key=None, shortcut_pa
         quoted.append(_ps_single_quote(os.path.abspath(path)))
     text = _POWERSHELL_TEMPLATE
     text = text.replace("__APP_NAME__", app)
+    text = text.replace("__APP_EXE_FILENAME__", DEFAULT_APP_EXE_FILENAME)
     text = text.replace("__ANCHOR_KEY__", anchor_key)
     text = text.replace("__RUN_KEY__", run_key)
     text = text.replace("__SHORTCUTS__", ", ".join(quoted))
@@ -1385,6 +1387,22 @@ function Test-SafeRelativePath([string]$Rel) {
         if ($reserved -contains $up -or $reserved -contains $stem) { return $false }
     }
     return $true
+}
+
+function Get-FileSha256([string]$Path) {
+    # Use the .NET runtime directly so safe uninstall does not depend on
+    # PowerShell module auto-loading (Get-FileHash may be unavailable).
+    $stream = $null
+    $sha = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $digest = $sha.ComputeHash($stream)
+        return ([BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Test-Reparse([string]$Path) {
@@ -1544,7 +1562,7 @@ if (-not (Test-Anchor $manifest)) {
 }
 
 try {
-    $AppExeName = $AppName + '.exe'
+    $AppExeName = '__APP_EXE_FILENAME__'
     Get-CimInstance Win32_Process | ForEach-Object {
         $exe = [string]$_.ExecutablePath
         if ([string]::IsNullOrWhiteSpace($exe)) { return }
@@ -1564,7 +1582,7 @@ try {
             }
         }
         if ([string]::IsNullOrWhiteSpace($expected)) { return }
-        try { $imageHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() }
+        try { $imageHash = Get-FileSha256 $exe }
         catch { return }
         if ($imageHash -ne $expected) { return }
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -1578,13 +1596,28 @@ foreach ($entry in $fileEntries) {
     $rel = [string]$entry.path
     if ($Recovery -contains $rel) { continue }
     $expect = ([string]$entry.sha256).ToLowerInvariant()
-    try { $full = Resolve-Owned $rel } catch { $preserved = $true; continue }
+    try { $full = Resolve-Owned $rel } catch {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host ('F02_DIAG resolve-owned: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message) }
+        $preserved = $true; continue
+    }
     if (-not (Test-Path -LiteralPath $full)) { continue }
-    if ((Test-Reparse $full) -or -not (Test-Path -LiteralPath $full -PathType Leaf)) { $preserved = $true; continue }
-    try { $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() }
-    catch { $preserved = $true; continue }
-    if ($hash -ne $expect) { $preserved = $true; continue }
-    try { [IO.File]::Delete($full) } catch { $preserved = $true }
+    if ((Test-Reparse $full) -or -not (Test-Path -LiteralPath $full -PathType Leaf)) {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host 'F02_DIAG file is reparse point or not a leaf' }
+        $preserved = $true; continue
+    }
+    try { $hash = Get-FileSha256 $full }
+    catch {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host ('F02_DIAG hash: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message) }
+        $preserved = $true; continue
+    }
+    if ($hash -ne $expect) {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host 'F02_DIAG hash mismatch' }
+        $preserved = $true; continue
+    }
+    try { [IO.File]::Delete($full) } catch {
+        if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') { Write-Host ('F02_DIAG delete: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message) }
+        $preserved = $true
+    }
 }
 if ($preserved) {
     Write-Host 'MANUAL CLEANUP REQUIRED: owned files were preserved. Manifest and uninstall scripts were kept. Exit code 3.'
@@ -1634,7 +1667,7 @@ foreach ($item in $recordedShortcuts) {
         continue
     }
     $hash = ''
-    try { $hash = (Get-FileHash -LiteralPath $lnkPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    try { $hash = Get-FileSha256 $lnkPath }
     catch { $finalFailed = $true; continue }
     $target = ''
     try {
@@ -1688,13 +1721,20 @@ try {
             $targetsUs = $false
             if ($exePath -and (Test-WithinRoot $exePath)) {
                 $leaf = [IO.Path]::GetFileName($exePath)
-                $parent = [IO.Path]::GetDirectoryName($exePath)
-                $rootCmp = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-                if ($parent -and
-                    ([StringComparer]::OrdinalIgnoreCase.Compare($leaf, ($AppName + '.exe')) -eq 0) -and
-                    ([StringComparer]::OrdinalIgnoreCase.Compare($parent.TrimEnd('\'), $rootCmp) -eq 0)) {
+                # Compare the complete, canonical file paths rather than the
+                # parent directory's raw spelling; do not adopt nested paths.
+                $actualExe = [IO.Path]::GetFullPath($exePath)
+                $expectedExe = [IO.Path]::GetFullPath((Join-Path $Root $AppExeName))
+                if (([StringComparer]::OrdinalIgnoreCase.Compare($leaf, $AppExeName) -eq 0) -and
+                    ([StringComparer]::OrdinalIgnoreCase.Compare($actualExe, $expectedExe) -eq 0)) {
                     $targetsUs = $true
                 }
+            }
+            if ($env:F02_UNINSTALL_DIAGNOSTICS -eq '1') {
+                $isInRoot = [bool](Test-WithinRoot $exePath)
+                $leafMatches = ([StringComparer]::OrdinalIgnoreCase.Compare([IO.Path]::GetFileName($exePath), $AppExeName) -eq 0)
+                $exactMatch = ([StringComparer]::OrdinalIgnoreCase.Compare([IO.Path]::GetFullPath($exePath), [IO.Path]::GetFullPath((Join-Path $Root $AppExeName))) -eq 0)
+                Write-Host ('F02_DIAG startup: value-present=1 within-root=' + $isInRoot + ' leaf-matches=' + $leafMatches + ' exact-path=' + $exactMatch + ' owned=' + $targetsUs)
             }
             if ($targetsUs) { $run.DeleteValue($AppName, $false) }
         }

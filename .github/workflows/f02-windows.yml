@@ -1,0 +1,202 @@
+name: F02 Windows verification
+
+on:
+  push:
+    branches:
+      - fix/f02-executable-name
+  pull_request:
+    branches:
+      - fix/f01-safe-uninstall
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-safety:
+    runs-on: windows-2022
+    env:
+      F02_UNINSTALL_DIAGNOSTICS: '1'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile installer modules
+        run: python -m compileall -q installer_engine.py installer_safety.py test_installer_safety.py
+      - name: Test F02 executable name and launch path
+        run: python -m unittest -v test_installer_safety.TestF02ExecutableName
+      - name: Test installer safety regressions
+        run: python -m unittest -v test_installer_safety
+
+  complete-suite:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Require natural exit from full test process
+        shell: pwsh
+        run: |
+          @'
+          import subprocess
+          import sys
+          try:
+              result = subprocess.run(
+                  [sys.executable, "-u", "run_all_tests.py"],
+                  timeout=240,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              print("FAIL: run_all_tests.py did not exit naturally within 240 seconds", flush=True)
+              sys.exit(124)
+          print(f"Full suite process exit code: {result.returncode}", flush=True)
+          sys.exit(result.returncode)
+          '@ | python -
+
+  packaging-contract:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Build application executable
+        run: python -m PyInstaller --noconfirm --clean NegmLoading.spec
+      - name: Package application
+        run: python make_installer_package.py
+      - name: Verify executable inside payload
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          from zipfile import ZipFile
+          exe = Path("dist/NegmLoading.exe")
+          assert exe.is_file(), "Packaged application executable missing"
+          with ZipFile("payload.zip") as z:
+              assert "NegmLoading.exe" in z.namelist(), "Payload executable name mismatch"
+              assert z.getinfo("NegmLoading.exe").file_size > 0, "Empty executable payload"
+          print("PASS: build and payload use NegmLoading.exe")
+          '@ | python -
+      - name: Build setup executable
+        run: python -m PyInstaller --noconfirm --clean NegmLoading-Setup.spec
+      - name: Verify setup artifact exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/NegmLoading-Setup.exe")) { throw "Setup binary missing" }
+          Get-FileHash "dist/NegmLoading-Setup.exe" -Algorithm SHA256
+      - name: Reject legacy untrusted uninstall without modifying user files
+        run: python -m unittest -v test_legacy_upgrade_guard
+      - name: Smoke install upgrade and safe-uninstall packaged payload in temporary test scope
+        env:
+          F02_UNINSTALL_DIAGNOSTICS: '1'
+        run: python -m unittest -v test_packaged_smoke
+      - name: Verify real setup GUI opens and closes without installation
+        run: python -m unittest -v test_setup_window_smoke
+      - name: Exercise GUI wizard install upgrade and safe uninstall with disposable HKCU
+        run: python -m unittest -v test_setup_wizard_flow
+      - name: Exercise REAL packaged setup EXE install upgrade and uninstall on fresh CI VM
+        timeout-minutes: 9
+        env:
+          NEGM_PACKAGED_E2E_ALLOW: isolated-ephemeral-vm
+        run: python -m unittest -v test_packaged_setup_e2e
+
+  ui-diagnostics:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Diagnose UI and media tests in isolated subprocesses
+        shell: pwsh
+        run: |
+          @'
+          import subprocess
+          import sys
+          failed = False
+          tests = [
+              "test_regression.TestNegmLoadingRegression.test_04_app_headless_lifecycle",
+              "test_media_grabber.TestMediaGrabberSystem.test_04_stream_badge_and_mock_analysis",
+              "test_proxy_vault.TestProxyManager.test_proxy_crud_and_active_selection",
+          ]
+          for test in tests:
+              print(f"DIAGNOSTIC START: {test}", flush=True)
+              try:
+                  result = subprocess.run(
+                      [sys.executable, "-u", "-m", "unittest", "-v", test],
+                      timeout=90,
+                      check=False,
+                  )
+                  print(f"DIAGNOSTIC EXIT: {test}: {result.returncode}", flush=True)
+                  if result.returncode != 0:
+                      failed = True
+              except subprocess.TimeoutExpired:
+                  print(f"DIAGNOSTIC TIMEOUT: {test}", flush=True)
+                  failed = True
+          sys.exit(1 if failed else 0)
+          '@ | python -
+
+  suite-module-isolation:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Require each test module to finish with a natural exit
+        shell: pwsh
+        run: |
+          @'
+          import subprocess
+          import sys
+          modules = [
+              "test_installer_safety",
+              "test_regression",
+              "test_queue_system",
+              "test_site_grabber",
+              "test_media_grabber",
+              "test_analytics",
+              "test_link_recovery",
+              "test_proxy_vault",
+              "test_web_remote",
+              "test_stress_profiling",
+          ]
+          for module in modules:
+              print(f"MODULE START: {module}", flush=True)
+              try:
+                  result = subprocess.run(
+                      [sys.executable, "-u", "-m", "unittest", "-v", module],
+                      check=False, timeout=120,
+                  )
+                  print(f"MODULE EXIT: {module}: {result.returncode}", flush=True)
+                  if result.returncode != 0:
+                      print(f"MODULE FAILED, stopping at first failure: {module}", flush=True)
+                      sys.exit(1)
+              except subprocess.TimeoutExpired:
+                  print(f"MODULE TIMEOUT, stopping at first timeout: {module}", flush=True)
+                  sys.exit(124)
+          print("PASS: every module completed with a natural zero exit", flush=True)
+          sys.exit(0)
+          '@ | python -

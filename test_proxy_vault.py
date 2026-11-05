@@ -72,6 +72,23 @@ class TestSiteCredentialVault(unittest.TestCase):
         except Exception:
             pass
 
+    def test_credential_ids_unique_when_clock_is_frozen(self):
+        from unittest.mock import patch
+        with patch("nexus_engine.time.time", return_value=1762380800.123):
+            added = [
+                self.vault.add_credential(
+                    f"example{i}.org", username=f"user{i}", password="test"
+                )
+                for i in range(3)
+            ]
+        ids = [item["id"] for item in added]
+        self.assertEqual(len(set(ids)), 3)
+        self.assertTrue(self.vault.delete_credential(ids[0]))
+        self.assertEqual(
+            {item["id"] for item in self.vault.get_all_credentials()},
+            set(ids[1:]),
+        )
+
     def test_credentials_matching_and_header_generation(self):
         # Add basic auth
         self.vault.add_credential("archive.org", "basic", username="archive_user", password="secret_pass")
@@ -130,11 +147,10 @@ class TestPhase11Dialogs(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if cls.app is not None:
-            try:
-                cls.app.is_closing = True
-                cls.app.destroy()
-            except Exception:
-                pass
+            # Close native tray and bridge threads before Tk is destroyed.
+            # Setting is_closing directly bypasses the application's cleanup.
+            cls.app.force_exit = True
+            cls.app.on_close()
 
     def setUp(self):
         if self.app is None:

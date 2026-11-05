@@ -25,6 +25,60 @@ import installer_safety as safety
 APP = safety.DEFAULT_APP_NAME
 
 
+class TestF02ExecutableName(unittest.TestCase):
+    def test_executable_filename_matches_build_and_payload(self):
+        # Display name stays stable for HKCU, shortcuts and prior manifests.
+        self.assertEqual(installer_engine.APP_NAME, "Negm Lodaing")
+        self.assertEqual(installer_engine.APP_EXE_FILENAME, "NegmLoading.exe")
+        self.assertEqual(safety.DEFAULT_APP_EXE_FILENAME, installer_engine.APP_EXE_FILENAME)
+        script = safety._powershell_uninstaller(installer_engine.APP_NAME)
+        self.assertIn("$AppExeName = 'NegmLoading.exe'", script)
+        self.assertNotIn("__APP_EXE_FILENAME__", script)
+        self.assertIn("function Get-FileSha256", script)
+        self.assertNotIn("(Get-FileHash -LiteralPath", script)
+        self.assertIn("Get-FileSha256 $full", script)
+        self.assertIn("Get-FileSha256 $lnkPath", script)
+        from pathlib import Path
+        root = Path(__file__).resolve().parent
+        build_spec = (root / "NegmLoading.spec").read_text(encoding="utf-8")
+        packaging = (root / "make_installer_package.py").read_text(encoding="utf-8")
+        self.assertIn("name='NegmLoading'", build_spec)
+        self.assertIn('z.write(exe_path, "NegmLoading.exe")', packaging)
+
+    def test_finish_install_launches_packaged_executable(self):
+        from unittest import mock
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as root:
+            exe = os.path.join(root, installer_engine.APP_EXE_FILENAME)
+            _write(exe, b"test executable placeholder")
+            wizard = SimpleNamespace(
+                chk_launch=SimpleNamespace(get=lambda: True),
+                install_dir=SimpleNamespace(get=lambda: root),
+                destroy=mock.Mock(),
+            )
+            with mock.patch.object(installer_engine.subprocess, "Popen") as popen:
+                installer_engine.SetupWizard.finish_install(wizard)
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], [exe])
+            wizard.destroy.assert_called_once_with()
+
+    def test_finish_install_does_not_launch_missing_executable(self):
+        from unittest import mock
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as root:
+            wizard = SimpleNamespace(
+                chk_launch=SimpleNamespace(get=lambda: True),
+                install_dir=SimpleNamespace(get=lambda: root),
+                destroy=mock.Mock(),
+            )
+            with mock.patch.object(installer_engine.subprocess, "Popen") as popen:
+                installer_engine.SetupWizard.finish_install(wizard)
+            popen.assert_not_called()
+            wizard.destroy.assert_called_once_with()
+
+
 def _write(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     mode = "wb" if isinstance(data, bytes) else "w"
@@ -896,28 +950,38 @@ class TestWindowsUninstallChain(unittest.TestCase):
     def test_cmd_anchor_delete_denied_keeps_manifest(self):
         if os.name != "nt":
             self.skipTest("Windows uninstall.cmd chain")
+        # Use RegistryKey ACL APIs directly. This does not depend on Get-Acl /
+        # Set-Acl module auto-loading and operates only on a unique test key.
         import winreg
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "Negm Lodaing Install")
             os.makedirs(root)
             key = _install_owned(root, {"owned.exe": b"payload"})
             env = os.environ.copy()
-            env["F01_KEY"] = "HKCU:\\" + key
+            env["F01_KEY"] = key
+            script_head = (
+                "$ErrorActionPreference = 'Stop'; "
+                "$rights = [Security.AccessControl.RegistryRights]::ChangePermissions -bor "
+                "[Security.AccessControl.RegistryRights]::ReadPermissions; "
+                "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("
+                "$env:F01_KEY, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights); "
+                "if ($null -eq $k) { throw 'Test registry key unavailable' }; "
+                "try { $acl = $k.GetAccessControl(); "
+                "$who = [Security.Principal.WindowsIdentity]::GetCurrent().User; "
+                "$rule = [Security.AccessControl.RegistryAccessRule]::new("
+                "$who, [Security.AccessControl.RegistryRights]::Delete, "
+                "[Security.AccessControl.InheritanceFlags]::None, "
+                "[Security.AccessControl.PropagationFlags]::None, "
+                "[Security.AccessControl.AccessControlType]::Deny); "
+            )
+            deny_script = script_head + "$acl.AddAccessRule($rule); $k.SetAccessControl($acl) } finally { $k.Dispose() }"
+            restore_script = script_head + "$acl.RemoveAccessRuleSpecific($rule); $k.SetAccessControl($acl) } finally { $k.Dispose() }"
             deny = subprocess.run(
-                [_powershell_exe(), "-NoProfile", "-Command",
-                 "$ErrorActionPreference = 'Stop'; "
-                 "$acl = Get-Acl $env:F01_KEY; "
-                 "$who = [Security.Principal.WindowsIdentity]::GetCurrent().Name; "
-                 "$rule = New-Object Security.AccessControl.RegistryAccessRule("
-                 "$who, [Security.AccessControl.RegistryRights]::Delete, "
-                 "[Security.AccessControl.InheritanceFlags]::None, "
-                 "[Security.AccessControl.PropagationFlags]::None, "
-                 "[Security.AccessControl.AccessControlType]::Deny); "
-                 "$acl.AddAccessRule($rule); Set-Acl $env:F01_KEY $acl"],
+                [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", deny_script],
                 env=env, capture_output=True, text=True,
             )
-            self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
             try:
+                self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
                 proc = _run_uninstall_cmd(root)
                 self.assertEqual(proc.returncode, safety.EXIT_FINAL, proc.stdout + proc.stderr)
                 self.assertIn("retry is possible", (proc.stdout or "").lower())
@@ -926,13 +990,11 @@ class TestWindowsUninstallChain(unittest.TestCase):
                 self.assertTrue(os.path.isfile(os.path.join(root, safety.UNINSTALL_PS1_FILENAME)))
                 winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
             finally:
-                subprocess.run(
-                    [_powershell_exe(), "-NoProfile", "-Command",
-                     "$acl = Get-Acl $env:F01_KEY; "
-                     "$acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' } | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }; "
-                     "Set-Acl $env:F01_KEY $acl"],
+                restore = subprocess.run(
+                    [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", restore_script],
                     env=env, capture_output=True, text=True,
                 )
+                self.assertEqual(restore.returncode, 0, restore.stdout + restore.stderr)
             again = _run_uninstall_cmd(root)
             self.assertEqual(again.returncode, safety.EXIT_OK, again.stdout + again.stderr)
 
