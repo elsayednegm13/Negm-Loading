@@ -34,6 +34,10 @@ class TestF02ExecutableName(unittest.TestCase):
         script = safety._powershell_uninstaller(installer_engine.APP_NAME)
         self.assertIn("$AppExeName = 'NegmLoading.exe'", script)
         self.assertNotIn("__APP_EXE_FILENAME__", script)
+        self.assertIn("function Get-FileSha256", script)
+        self.assertNotIn("(Get-FileHash -LiteralPath", script)
+        self.assertIn("Get-FileSha256 $full", script)
+        self.assertIn("Get-FileSha256 $lnkPath", script)
         from pathlib import Path
         root = Path(__file__).resolve().parent
         build_spec = (root / "NegmLoading.spec").read_text(encoding="utf-8")
