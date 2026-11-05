@@ -90,8 +90,15 @@ class TestPackagedPayloadSmoke(unittest.TestCase):
                 with self.assertRaises(safety.InstallSafetyError):
                     safety.read_install_anchor(anchor)
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key) as reg:
-                    with self.assertRaises(FileNotFoundError):
-                        winreg.QueryValueEx(reg, installer_engine.APP_NAME)
+                    try:
+                        remaining, _kind = winreg.QueryValueEx(reg, installer_engine.APP_NAME)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        self.fail(
+                            "Owned Windows Run value remained after uninstall. "
+                            "Uninstall diagnostics: " + completed.stdout
+                        )
                     self.assertEqual(
                         winreg.QueryValueEx(reg, "ForeignDoNotTouch")[0],
                         r"C:\Foreign\app.exe",
