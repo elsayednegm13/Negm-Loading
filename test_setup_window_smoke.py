@@ -29,6 +29,8 @@ class TestPackagedSetupWindow(unittest.TestCase):
             wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
         ]
         user32.PostMessageW.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
 
         def find_setup():
             return user32.FindWindowW(None, title)
@@ -49,6 +51,15 @@ class TestPackagedSetupWindow(unittest.TestCase):
                     self.fail("Setup exited before displaying its main window")
                 time.sleep(0.4)
             self.assertTrue(hwnd, "Packaged setup main window did not appear")
+            # Tk assigns its window title during initialization, before mainloop.
+            # Wait for a visible, responsive startup rather than posting WM_CLOSE
+            # at the instant FindWindow first observes the early Tk window.
+            visible_until = time.monotonic() + 15
+            while not user32.IsWindowVisible(hwnd) and time.monotonic() < visible_until:
+                time.sleep(0.2)
+            self.assertTrue(user32.IsWindowVisible(hwnd), "Setup window is not visible")
+            time.sleep(2.0)
+            self.assertIsNone(proc.poll(), "Setup exited before the close request")
             # Ask the real Tk application to close. DO NOT click Install.
             self.assertTrue(
                 user32.PostMessageW(hwnd, 0x0010, 0, 0),
@@ -57,7 +68,11 @@ class TestPackagedSetupWindow(unittest.TestCase):
             try:
                 proc.wait(timeout=25)
             except subprocess.TimeoutExpired:
-                self.fail("Packaged setup did not close naturally")
+                still_open = bool(find_setup())
+                self.fail(
+                    f"Packaged setup did not close naturally; "
+                    f"window_still_exists={still_open}, launcher_pid={proc.pid}"
+                )
             self.assertEqual(proc.returncode, 0, "Setup ended abnormally")
         finally:
             if proc.poll() is None:
