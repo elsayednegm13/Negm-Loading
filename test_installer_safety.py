@@ -950,6 +950,17 @@ class TestWindowsUninstallChain(unittest.TestCase):
     def test_cmd_anchor_delete_denied_keeps_manifest(self):
         if os.name != "nt":
             self.skipTest("Windows uninstall.cmd chain")
+        # An ACL deny test requires the PowerShell Security module to load.
+        # A runner without that module cannot establish the test precondition.
+        probe = subprocess.run(
+            [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
+             "$ErrorActionPreference = 'Stop'; Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; "
+             "Get-Command Get-Acl -ErrorAction Stop | Out-Null; "
+             "Get-Command Set-Acl -ErrorAction Stop | Out-Null"],
+            capture_output=True, text=True,
+        )
+        if probe.returncode != 0:
+            self.skipTest("PowerShell Security module unavailable; registry ACL denial NOT TESTED")
         import winreg
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "Negm Lodaing Install")
