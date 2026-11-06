@@ -65,7 +65,7 @@ def run_and_finalize_test_stage(stage_root, anchor_key, *, consent=None):
     launcher_sha = recorded[safety.UNINSTALL_CMD_FILENAME.casefold()]["sha256"]
 
     result = subprocess.run(
-        ["cmd.exe", "/s", "/c", '""%s""' % launcher],
+        'cmd.exe /s /c ""%s""' % launcher,
         cwd=str(stage.parent), capture_output=True, timeout=120,
         check=False,
     )
