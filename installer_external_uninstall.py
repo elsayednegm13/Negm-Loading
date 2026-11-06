@@ -5,8 +5,8 @@ This is deliberately separate from the Windows setup wizard. It can drive
 ONLY an existing, HKCU-anchored, manifest-owned modern installation. It does
 not migrate an old version and never runs an old legacy uninstall.cmd.
 
-Unlike the old batch entrypoint, this coordinator can wait for cmd.exe to
-finish BEFORE deleting the last verified launcher. The preflight is STRICT:
+Unlike the old batch entrypoint, this coordinator invokes the verified
+PowerShell helper directly and THEN deletes the last verified batch launcher. The preflight is STRICT:
 every on-disk file must match the HKCU-bound manifest and no unexpected
 directory, link, shortcut or startup integration is accepted.
 
@@ -185,20 +185,22 @@ def complete_verified_uninstall(root, anchor_key, *, consent=None):
     folder = Path(safety.validate_install_root(os.fspath(root)))
     if not isinstance(anchor_key, str) or not safety._safe_registry_key(anchor_key):
         raise safety.InstallSafetyError("Invalid registry identity")
-    # cmd.exe expands percent variables even inside quotes. Until a native
-    # external helper is packaged, refuse shell metacharacters in root paths.
-    if any(char in str(folder) for char in ('"', '%', '!', '^', '&', '|', '<', '>', '\r', '\n')):
-        raise safety.InstallSafetyError("Unsafe command-interpreter path")
+    # There is no shell interpolation: PowerShell is called as an executable
+    # with separate arguments. A literal path is never evaluated as script.
     with _uninstall_lock(folder, anchor_key):
         prepared = _anchored_preflight(folder, anchor_key)
         cmd = folder / safety.UNINSTALL_CMD_FILENAME
-        # cmd.exe /s /c quoting is the variant verified in the Windows F01
-        # tests; never interpolate this argument into a PowerShell source.
+        helper = folder / safety.UNINSTALL_PS1_FILENAME
+        # Never launch the batch file, whose self-removal is unreliable.
+        # Execute the HKCU-manifest-verified PowerShell helper directly with
+        # an argument vector; this avoids cmd.exe expansion/injection.
         try:
             result = subprocess.run(
-                'cmd.exe /s /c ""%s""' % cmd,
+                [safety._powershell_exe(), "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(helper)],
                 cwd=str(folder.parent), capture_output=True,
                 timeout=120, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise safety.InstallSafetyError(
