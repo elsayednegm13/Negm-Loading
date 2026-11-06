@@ -174,6 +174,39 @@ class TestSafeSealedStagedInstall(unittest.TestCase):
         self.assertFalse((self.stage / safety.MANIFEST_FILENAME).exists())
         self.assert_legacy_unchanged()
 
+    def test_modified_batch_launcher_fails_before_removing_any_payload(self):
+        self.seal()
+        launcher = self.stage / safety.UNINSTALL_CMD_FILENAME
+        with open(launcher, "ab") as output:
+            output.write(b"\r\nrem user owned modification\r\n")
+        modified_digest = safety.sha256_file(str(launcher))
+        result = subprocess.run(
+            f'cmd.exe /s /c ""{launcher}""',
+            cwd=str(self.base), capture_output=True, text=True,
+            timeout=120, check=False,
+        )
+        self.assertEqual(result.returncode, safety.EXIT_VERIFY_FAILED)
+        self.assertEqual(safety.sha256_file(str(launcher)), modified_digest)
+        self.assertTrue((self.stage / "NegmLoading.exe").is_file())
+        self.assertTrue((self.stage / safety.MANIFEST_FILENAME).is_file())
+        self.assert_legacy_unchanged()
+
+    def test_modified_powershell_helper_fails_before_removing_any_payload(self):
+        self.seal()
+        helper = self.stage / safety.UNINSTALL_PS1_FILENAME
+        with open(helper, "ab") as output:
+            output.write(b"\r\n# user owned modification\r\n")
+        changed_digest = safety.sha256_file(str(helper))
+        result = subprocess.run(
+            f'cmd.exe /s /c ""{self.stage / safety.UNINSTALL_CMD_FILENAME}""',
+            cwd=str(self.base), capture_output=True, text=True,
+            timeout=120, check=False,
+        )
+        self.assertEqual(result.returncode, safety.EXIT_VERIFY_FAILED)
+        self.assertEqual(safety.sha256_file(str(helper)), changed_digest)
+        self.assertTrue((self.stage / "NegmLoading.exe").is_file())
+        self.assert_legacy_unchanged()
+
     def test_real_product_registry_anchor_is_always_rejected(self):
         with self.assertRaises(legacy.MigrationBlocked):
             seal.seal_staged_install_for_test(
