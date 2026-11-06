@@ -183,6 +183,12 @@ def complete_verified_uninstall(root, anchor_key, *, consent=None):
     if not isinstance(root, (str, os.PathLike)) or not os.path.isabs(root):
         raise safety.InstallSafetyError("Absolute install root required")
     folder = Path(safety.validate_install_root(os.fspath(root)))
+    if not isinstance(anchor_key, str) or not safety._safe_registry_key(anchor_key):
+        raise safety.InstallSafetyError("Invalid registry identity")
+    # cmd.exe expands percent variables even inside quotes. Until a native
+    # external helper is packaged, refuse shell metacharacters in root paths.
+    if any(char in str(folder) for char in ('"', '%', '!', '^', '&', '|', '<', '>', '\r', '\n')):
+        raise safety.InstallSafetyError("Unsafe command-interpreter path")
     with _uninstall_lock(folder, anchor_key):
         prepared = _anchored_preflight(folder, anchor_key)
         cmd = folder / safety.UNINSTALL_CMD_FILENAME
