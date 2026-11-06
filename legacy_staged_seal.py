@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""F03: TEST-ONLY sealing of an isolated staged install with an F01 anchor.
+r"""F03: TEST-ONLY sealing of an isolated staged install with an F01 anchor.
 
 A payload extracted by legacy_stage is NOT an installed application: it has
 neither a verified F01 manifest nor a safe uninstall script / HKCU anchor.
