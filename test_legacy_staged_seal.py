@@ -16,6 +16,7 @@ import installer_safety as safety
 import legacy_migration as legacy
 import legacy_stage
 import legacy_staged_seal as seal
+import legacy_staged_finalize as finalizer
 from test_legacy_migration import _reg
 
 
@@ -97,29 +98,54 @@ class TestSafeSealedStagedInstall(unittest.TestCase):
         self.assertNotIn(safety.DEFAULT_UNINSTALL_KEY, script)
         self.assert_legacy_unchanged()
 
-    def test_real_generated_cmd_safely_uninstalls_only_new_stage(self):
+    def test_external_finalizer_removes_only_verified_modern_staging(self):
         self.seal()
-        uninstaller = self.stage / safety.UNINSTALL_CMD_FILENAME
-        result = subprocess.run(
-            f'cmd.exe /s /c ""{uninstaller}""',
-            # An uninstaller cannot reliably remove its own current working
-            # directory while Windows cmd.exe still holds that directory open.
-            # Exercise launch via an independent parent directory instead.
-            cwd=str(self.base), capture_output=True, text=True,
-            timeout=120, check=False,
+        result = finalizer.run_and_finalize_test_stage(
+            self.stage, self.key, consent=finalizer.CONSENT,
         )
-        self.assertEqual(result.returncode, safety.EXIT_OK,
-                         "Safe test-scope uninstaller must exit 0")
-        self.assertFalse(
-            self.stage.exists(),
-            "Uninstaller returned 0 but retained: " +
-            str(sorted(p.name for p in self.stage.iterdir())
-                if self.stage.is_dir() else []),
+        self.assertEqual(
+            result["status"],
+            "TEST_STAGE_REMOVED_WITH_EXTERNAL_OWNED_LAUNCHER_FINALIZER",
         )
+        self.assertFalse(result["production_activation"])
+        self.assertFalse(self.stage.exists(), "The separate finalizer must remove an empty root")
         self.assert_legacy_unchanged()
         import winreg
         with self.assertRaises(FileNotFoundError):
             winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.key)
+
+    def test_external_finalizer_requires_opt_in(self):
+        self.seal()
+        with self.assertRaises(legacy.MigrationBlocked):
+            finalizer.run_and_finalize_test_stage(self.stage, self.key)
+        self.assertTrue((self.stage / "NegmLoading.exe").is_file())
+        self.assert_legacy_unchanged()
+
+    def test_external_finalizer_keeps_untracked_file_and_recovery_artifacts(self):
+        self.seal()
+        note = self.stage / "my-personal-notes.txt"
+        note.write_text("PRESERVE ME", encoding="utf-8")
+        with self.assertRaises(legacy.MigrationBlocked):
+            finalizer.run_and_finalize_test_stage(
+                self.stage, self.key, consent=finalizer.CONSENT
+            )
+        self.assertEqual(note.read_text(encoding="utf-8"), "PRESERVE ME")
+        self.assertTrue((self.stage / safety.MANIFEST_FILENAME).exists())
+        self.assert_legacy_unchanged()
+
+    def test_external_finalizer_never_runs_modified_launcher(self):
+        self.seal()
+        launcher = self.stage / safety.UNINSTALL_CMD_FILENAME
+        with open(launcher, "ab") as stream:
+            stream.write(b"\\r\\nrem user-modified launcher\\r\\n")
+        digest = safety.sha256_file(str(launcher))
+        with self.assertRaises(legacy.MigrationBlocked):
+            finalizer.run_and_finalize_test_stage(
+                self.stage, self.key, consent=finalizer.CONSENT
+            )
+        self.assertEqual(safety.sha256_file(str(launcher)), digest)
+        self.assertTrue((self.stage / "NegmLoading.exe").is_file())
+        self.assert_legacy_unchanged()
 
     def test_untracked_stage_data_is_preserved_by_generated_uninstaller(self):
         self.seal()
