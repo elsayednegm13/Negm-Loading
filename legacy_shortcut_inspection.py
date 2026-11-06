@@ -31,7 +31,7 @@ CANDIDATE_STATUS = "TARGET_MATCH_ONLY_NOT_OWNERSHIP_PROOF"
 _READ_COM = r"""
 $ErrorActionPreference = 'Stop'
 try {
-    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
     $path = $env:NEGM_F03_SHORTCUT_READ_PATH
     if ([string]::IsNullOrWhiteSpace($path)) { exit 20 }
     $ws = New-Object -ComObject WScript.Shell
