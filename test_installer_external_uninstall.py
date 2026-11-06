@@ -214,8 +214,16 @@ class TestExternalOwnedUninstall(unittest.TestCase):
         original_run = coordinator.subprocess.run
         def interpose(*args, **kwargs):
             result = original_run(*args, **kwargs)
-            self.assertEqual(result.returncode, safety.EXIT_OK)
-            shortcut.write_bytes(b"foreign shortcut created after uninstall")
+            # subprocess.run is shared by all importers. The COM reader
+            # also invokes PowerShell to inspect the shortcut; inject only
+            # AFTER the manifest-verified uninstall helper has returned.
+            command = args[0] if args else None
+            if (isinstance(command, list) and "-File" in command
+                    and str(command[command.index("-File") + 1]).endswith(
+                        safety.UNINSTALL_PS1_FILENAME
+                    )):
+                self.assertEqual(result.returncode, safety.EXIT_OK)
+                shortcut.write_bytes(b"foreign shortcut created after uninstall")
             return result
         with mock.patch.object(coordinator.subprocess, "run", side_effect=interpose):
             with self.assertRaises(safety.InstallSafetyError):
