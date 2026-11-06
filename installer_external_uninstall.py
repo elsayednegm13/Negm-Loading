@@ -8,7 +8,8 @@ not migrate an old version and never runs an old legacy uninstall.cmd.
 Unlike the old batch entrypoint, this coordinator invokes the verified
 PowerShell helper directly and THEN deletes the last verified batch launcher. The preflight is STRICT:
 every on-disk file must match the HKCU-bound manifest and no unexpected
-directory, link, shortcut or startup integration is accepted.
+directory or link is accepted. Shortcut-owning installations are blocked;
+existing startup-value handling remains in the F01 verified helper.
 
 Security model: same-user HKCU authority (as in F01); a malicious same-user
 process can race registry and filesystem writes. Lock is cooperative only.
