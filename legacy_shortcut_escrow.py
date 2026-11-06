@@ -52,9 +52,6 @@ def _read_escrow(vault, source_backup, crypto):
     records = doc["shortcuts"]
     if not isinstance(records, list) or not 0 < len(records) <= len(ALLOWED):
         raise legacy.MigrationBlocked("Invalid shortcut escrow count")
-    if set(doc["shortcuts"][0]) != {
-            "label", "source", "sha256", "cipher_file"}:
-        raise legacy.MigrationBlocked("Malformed shortcut escrow entry")
     names = set()
     recovered = {}
     for item in records:
