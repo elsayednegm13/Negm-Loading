@@ -50,15 +50,21 @@ def _safe_directory(path):
         raise safety.InstallSafetyError("Linked or invalid uninstall directory")
 
 
+def _lock_filename(root, anchor_key):
+    """Normalize Windows 8.3/long names to the SAME cooperative lock key."""
+    if not isinstance(anchor_key, str) or not safety._safe_registry_key(anchor_key):
+        raise safety.InstallSafetyError("Invalid registry identity for lock")
+    identity = (os.path.normcase(os.path.realpath(os.fspath(root))) + "\n"
+                + anchor_key.casefold()).encode("utf-8")
+    return "negm-owned-uninstall-" + hashlib.sha256(identity).hexdigest() + ".lock"
+
+
 @contextlib.contextmanager
 def _uninstall_lock(root, anchor_key):
     """Cooperative OS lock outside the install folder, kept across restarts."""
     import msvcrt
 
-    identity = (os.path.normcase(os.path.abspath(root)) + "\n"
-                + anchor_key.casefold()).encode("utf-8")
-    lockname = "negm-owned-uninstall-" + hashlib.sha256(identity).hexdigest() + ".lock"
-    lockfile = Path(tempfile.gettempdir()) / lockname
+    lockfile = Path(tempfile.gettempdir()) / _lock_filename(root, anchor_key)
     _safe_directory(lockfile.parent)
     if os.path.lexists(lockfile):
         _safe_file(lockfile)
