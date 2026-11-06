@@ -1,0 +1,144 @@
+name: F03 legacy migration safety
+
+on:
+  push:
+    branches:
+      - feat/f03-safe-legacy-migration
+  pull_request:
+    branches:
+      - fix/f02-executable-name
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-dpapi-windows:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install project requirements
+        run: python -m pip install -r requirements.txt
+      - name: Compile snapshot and test modules
+        run: python -m compileall -q legacy_migration.py legacy_stage.py legacy_upgrade_cli.py legacy_handover_preview.py test_legacy_migration.py test_legacy_stage.py test_legacy_cli.py test_legacy_handover_preview.py legacy_data_compatibility.py test_legacy_data_compatibility.py test_legacy_handover_restart.py legacy_shortcut_preview.py test_legacy_shortcut_preview.py legacy_resources_preview.py test_legacy_resources_preview.py test_legacy_resources_restart.py legacy_shortcut_inspection.py test_legacy_shortcut_inspection.py legacy_shortcut_escrow.py test_legacy_shortcut_escrow.py test_legacy_state_first_import.py legacy_staged_seal.py test_legacy_staged_seal.py legacy_staged_finalize.py installer_external_uninstall.py test_installer_external_uninstall.py
+      - name: Require all read-only/DPAPI snapshot tests to pass
+        run: python -m unittest -v test_legacy_migration test_legacy_stage test_legacy_cli test_legacy_handover_preview test_legacy_data_compatibility test_legacy_shortcut_preview test_legacy_resources_preview
+      - name: Exercise real DPAPI and disposable HKCU migration-preparation pipeline
+        run: python -m unittest -v test_legacy_windows_pipeline
+      - name: Prove fresh-process recovery after sudden Python termination
+        run: python -m unittest -v test_legacy_handover_restart
+      - name: Prove registry and shortcut recovery after real subprocess crash
+        run: python -m unittest -v test_legacy_resources_restart
+      - name: Inspect real legacy Windows Shell Link targets without modifying shortcuts
+        run: python -m unittest -v test_legacy_shortcut_inspection
+      - name: Encrypt original real shortcuts and prove isolated recovery
+        run: python -m unittest -v test_legacy_shortcut_escrow
+      - name: Read sanitized legacy profile through actual application engine
+        run: python -m unittest -v test_legacy_state_first_import
+      - name: Seal disposable modern install with F01 test anchor and verify its safe uninstaller
+        timeout-minutes: 4
+        run: python -m unittest -v test_legacy_staged_seal
+      - name: Test external verified uninstall and ownership preflight on disposable Windows installs
+        timeout-minutes: 5
+        run: python -m unittest -v test_installer_external_uninstall
+      - name: Prevent regressions in complete F01/F02 safe-install test suite
+        timeout-minutes: 6
+        run: python -m unittest -v test_installer_safety
+      - name: Retain previous fail-closed legacy refusal coverage
+        run: python -m unittest -v test_legacy_upgrade_guard
+      - name: Require installer filename contract unchanged
+        run: python -m unittest -v test_installer_safety.TestF02ExecutableName
+
+  legacy-inventory-portability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Read-only inventory and injected-cipher fail-closed tests
+        run: python -m unittest -v test_legacy_migration test_legacy_stage test_legacy_cli test_legacy_handover_preview test_legacy_data_compatibility test_legacy_shortcut_preview test_legacy_resources_preview test_legacy_shortcut_inspection test_legacy_shortcut_escrow test_installer_external_uninstall
+
+
+  packaged-f03-e2e:
+    # Fresh GitHub-hosted Windows VM only. The packaged GUI registers the
+    # product's normal HKCU key, but the test refuses a pre-existing key.
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned project requirements
+        run: python -m pip install -r requirements.txt
+      - name: Compile packaged E2E tests and uninstall coordinator
+        run: python -m compileall -q installer_external_uninstall.py test_installer_external_uninstall.py test_packaged_setup_e2e.py test_f03_packaged_external_e2e.py
+      - name: Build actual NegmLoading executable
+        run: python -m PyInstaller --noconfirm --clean NegmLoading.spec
+      - name: Produce payload.zip from actual executable
+        run: python make_installer_package.py
+      - name: Build actual NegmLoading Setup executable
+        run: python -m PyInstaller --noconfirm --clean NegmLoading-Setup.spec
+      - name: Verify both packaged binaries exist
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/NegmLoading.exe")) { throw "App binary missing" }
+          if (-not (Test-Path "dist/NegmLoading-Setup.exe")) { throw "Setup binary missing" }
+          if (-not (Test-Path "payload.zip")) { throw "Packaged payload missing" }
+          Get-FileHash "dist/NegmLoading.exe" -Algorithm SHA256
+          Get-FileHash "dist/NegmLoading-Setup.exe" -Algorithm SHA256
+      - name: Verify actual packaged Setup GUI install/upgrade and refusal of untrusted legacy install
+        timeout-minutes: 10
+        env:
+          NEGM_PACKAGED_E2E_ALLOW: isolated-ephemeral-vm
+        run: python -m unittest -v test_packaged_setup_e2e
+      - name: Verify external complete uninstall of real GUI-created install and shortcuts
+        timeout-minutes: 10
+        env:
+          NEGM_PACKAGED_E2E_ALLOW: isolated-ephemeral-vm
+        run: python -m unittest -v test_f03_packaged_external_e2e
+
+
+  f03-full-regression:
+    # F03 must not break existing downloader / GUI / network-mock tests.
+    runs-on: windows-2022
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Require full application regression suite to exit naturally
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          @'
+          import subprocess
+          import sys
+          try:
+              result = subprocess.run(
+                  [sys.executable, "-u", "run_all_tests.py"],
+                  timeout=240,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired:
+              print("FAIL: full app test process hung after 240 seconds", flush=True)
+              sys.exit(124)
+          print(f"F03 full regression process exit code: {result.returncode}", flush=True)
+          sys.exit(result.returncode)
+          '@ | python -

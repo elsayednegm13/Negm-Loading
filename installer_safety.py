@@ -1561,6 +1561,31 @@ if (-not (Test-Anchor $manifest)) {
     exit 2
 }
 
+# Before any deletion, verify both recovery scripts against the anchored
+# manifest; a user-modified batch file must never be silently deleted.
+foreach ($recoveryName in @($CmdName, $HelperName)) {
+    $matching = @($manifest.files | Where-Object {
+        [StringComparer]::OrdinalIgnoreCase.Compare([string]$_.path, $recoveryName) -eq 0
+    })
+    if ($matching.Count -ne 1) {
+        Write-Host 'MANUAL CLEANUP REQUIRED: uninstall artifact inventory is untrusted. Exit code 2.'
+        exit 2
+    }
+    try {
+        $recoveryPath = Resolve-Owned $recoveryName
+        if ((Test-Reparse $recoveryPath) -or -not (Test-Path -LiteralPath $recoveryPath -PathType Leaf)) {
+            throw 'Missing or linked uninstall artifact'
+        }
+        $actualRecoveryHash = Get-FileSha256 $recoveryPath
+        if ($actualRecoveryHash -ne ([string]$matching[0].sha256).ToLowerInvariant()) {
+            throw 'Modified uninstall artifact'
+        }
+    } catch {
+        Write-Host 'MANUAL CLEANUP REQUIRED: modified or unreadable uninstall artifact. Exit code 2.'
+        exit 2
+    }
+}
+
 try {
     $AppExeName = '__APP_EXE_FILENAME__'
     Get-CimInstance Win32_Process | ForEach-Object {
