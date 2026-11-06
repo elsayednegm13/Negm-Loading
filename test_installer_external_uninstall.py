@@ -21,7 +21,7 @@ class TestExternalOwnedUninstall(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="f03-external-owner-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
-        self.root = self.base / "Isolated Modern Install"
+        self.root = self.base / "Isolated & Modern Install"
         self.root.mkdir()
         (self.root / safety.DEFAULT_APP_EXE_FILENAME).write_bytes(b"fake modern app, never run")
         asset = self.root / "assets"
@@ -159,6 +159,57 @@ class TestExternalOwnedUninstall(unittest.TestCase):
             with self.assertRaises(safety.InstallSafetyError):
                 self.run_remove()
         self.assert_still_installed()
+
+    def test_powershell_is_called_directly_without_shell_interpolation(self):
+        # The test root contains an '&'; passing argv avoids cmd.exe expansion.
+        with mock.patch.object(
+            coordinator.subprocess, "run",
+            return_value=SimpleNamespace(returncode=safety.EXIT_VERIFY_FAILED),
+        ) as run:
+            with self.assertRaises(safety.InstallSafetyError):
+                self.run_remove()
+        command = run.call_args.args[0]
+        self.assertIsInstance(command, list)
+        self.assertTrue(command[0].lower().endswith("powershell.exe"))
+        self.assertIn("-File", command)
+        self.assertEqual(
+            command[command.index("-File") + 1],
+            str(self.root / safety.UNINSTALL_PS1_FILENAME),
+        )
+        self.assert_still_installed()
+
+    def test_post_uninstall_foreign_file_is_preserved_and_blocks_finalize(self):
+        original = coordinator.subprocess.run
+        extra = self.root / "created-after-helper.txt"
+        def interpose(*args, **kwargs):
+            done = original(*args, **kwargs)
+            self.assertEqual(done.returncode, safety.EXIT_OK)
+            extra.write_text("KEEP NEW DATA", encoding="utf-8")
+            return done
+        with mock.patch.object(coordinator.subprocess, "run",
+                               side_effect=interpose):
+            with self.assertRaises(safety.InstallSafetyError):
+                self.run_remove()
+        self.assertEqual(extra.read_text(encoding="utf-8"), "KEEP NEW DATA")
+        self.assertTrue((self.root / safety.UNINSTALL_CMD_FILENAME).exists())
+        self.assertEqual(self.external.read_text(encoding="utf-8"), "KEEP")
+
+    def test_post_uninstall_launcher_change_blocks_final_delete(self):
+        original = coordinator.subprocess.run
+        launcher = self.root / safety.UNINSTALL_CMD_FILENAME
+        def interpose(*args, **kwargs):
+            done = original(*args, **kwargs)
+            self.assertEqual(done.returncode, safety.EXIT_OK)
+            with open(launcher, "ab") as out:
+                out.write(b"\r\nrem altered between verify and finalization\r\n")
+            return done
+        with mock.patch.object(coordinator.subprocess, "run",
+                               side_effect=interpose):
+            with self.assertRaises(safety.InstallSafetyError):
+                self.run_remove()
+        self.assertTrue(launcher.exists())
+        self.assertIn(b"altered between verify", launcher.read_bytes())
+        self.assertEqual(self.external.read_text(encoding="utf-8"), "KEEP")
 
     def test_subprocess_error_never_deletes_unverified_launcher(self):
         with mock.patch.object(
