@@ -145,6 +145,82 @@ class TestExternalOwnedUninstall(unittest.TestCase):
         self.assertEqual(shortcut.read_bytes(), b"fake link; not owned")
         self.assert_still_installed()
 
+    def _create_owned_windows_shortcut(self):
+        from test_legacy_shortcut_inspection import _CREATE_LINK
+        path = self.base / "Disposable Desktop" / "Negm Lodaing.lnk"
+        path.parent.mkdir()
+        env = os.environ.copy()
+        env.update({
+            "NEGM_F03_TEST_LINK": str(path),
+            "NEGM_F03_TEST_TARGET": str(self.root / safety.DEFAULT_APP_EXE_FILENAME),
+            "NEGM_F03_TEST_ARGUMENTS": "",
+            "NEGM_F03_TEST_WORKDIR": str(self.root),
+            "NEGM_F03_TEST_ICON": str(self.root / safety.DEFAULT_APP_EXE_FILENAME) + ",0",
+        })
+        result = coordinator.subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _CREATE_LINK],
+            env=env, capture_output=True, timeout=20,
+            creationflags=getattr(coordinator.subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(path.is_file())
+        safety.write_uninstall_artifacts(
+            str(self.root),
+            [{"path": safety.DEFAULT_APP_EXE_FILENAME, "role": "payload"},
+             {"path": r"assets\icon.png", "role": "payload"}],
+            [{"path": "assets"}],
+            created_root=True, anchor_key=self.key,
+            run_key=self.key + r"\Run", shortcut_paths=[str(path)],
+        )
+        manifest = safety.load_manifest(str(self.root))
+        self.assertEqual(len(manifest["shortcuts"]), 1)
+        self.assertEqual(manifest["shortcuts"][0]["target"],
+                         str(self.root / safety.DEFAULT_APP_EXE_FILENAME))
+        self.assertTrue(manifest["shortcuts"][0]["sha256"])
+        return path
+
+    def test_owned_windows_shortcut_is_deleted_by_verified_helper(self):
+        shortcut = self._create_owned_windows_shortcut()
+        result = self.run_remove()
+        self.assertEqual(result["status"], "COMPLETE_VERIFIED_UNINSTALL")
+        self.assertFalse(self.root.exists())
+        self.assertFalse(shortcut.exists())
+        self.assertEqual(self.external.read_text(encoding="utf-8"), "KEEP")
+
+    def test_modified_owned_windows_shortcut_blocks_preflight(self):
+        shortcut = self._create_owned_windows_shortcut()
+        with open(shortcut, "ab") as out:
+            out.write(b"test-only third-party edit")
+        old = shortcut.read_bytes()
+        with self.assertRaises(safety.InstallSafetyError):
+            self.run_remove()
+        self.assertEqual(shortcut.read_bytes(), old)
+        self.assert_still_installed()
+
+    def test_original_owned_shortcut_can_be_manually_removed_before_uninstall(self):
+        shortcut = self._create_owned_windows_shortcut()
+        shortcut.unlink()
+        result = self.run_remove()
+        self.assertEqual(result["status"], "COMPLETE_VERIFIED_UNINSTALL")
+        self.assertFalse(self.root.exists())
+        self.assertFalse(shortcut.exists())
+
+    def test_link_recreated_after_helper_blocks_final_result(self):
+        shortcut = self._create_owned_windows_shortcut()
+        original_run = coordinator.subprocess.run
+        def interpose(*args, **kwargs):
+            result = original_run(*args, **kwargs)
+            self.assertEqual(result.returncode, safety.EXIT_OK)
+            shortcut.write_bytes(b"foreign shortcut created after uninstall")
+            return result
+        with mock.patch.object(coordinator.subprocess, "run", side_effect=interpose):
+            with self.assertRaises(safety.InstallSafetyError):
+                self.run_remove()
+        self.assertEqual(shortcut.read_bytes(),
+                         b"foreign shortcut created after uninstall")
+        self.assertEqual(self.external.read_text(encoding="utf-8"), "KEEP")
+        self.assertTrue((self.root / safety.UNINSTALL_CMD_FILENAME).exists())
+
     def test_lock_collision_refuses_and_leaves_install_intact(self):
         with coordinator._uninstall_lock(self.root, self.key):
             with self.assertRaises(safety.InstallSafetyError):
