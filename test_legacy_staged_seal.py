@@ -102,12 +102,20 @@ class TestSafeSealedStagedInstall(unittest.TestCase):
         uninstaller = self.stage / safety.UNINSTALL_CMD_FILENAME
         result = subprocess.run(
             f'cmd.exe /s /c ""{uninstaller}""',
-            cwd=str(self.stage), capture_output=True, text=True,
+            # An uninstaller cannot reliably remove its own current working
+            # directory while Windows cmd.exe still holds that directory open.
+            # Exercise launch via an independent parent directory instead.
+            cwd=str(self.base), capture_output=True, text=True,
             timeout=120, check=False,
         )
         self.assertEqual(result.returncode, safety.EXIT_OK,
                          "Safe test-scope uninstaller must exit 0")
-        self.assertFalse(self.stage.exists())
+        self.assertFalse(
+            self.stage.exists(),
+            "Uninstaller returned 0 but retained: " +
+            str(sorted(p.name for p in self.stage.iterdir())
+                if self.stage.is_dir() else []),
+        )
         self.assert_legacy_unchanged()
         import winreg
         with self.assertRaises(FileNotFoundError):
