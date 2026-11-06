@@ -26,6 +26,7 @@ import tempfile
 from pathlib import Path
 
 import installer_safety as safety
+import legacy_migration as legacy
 
 CONSENT = "REMOVE_THIS_VERIFIED_MODERN_INSTALL"
 MAX_INVENTORY = 10000
@@ -130,10 +131,24 @@ def _anchored_preflight(root, anchor_key):
             raise safety.InstallSafetyError(
                 "Cannot verify shortcut target"
             ) from exc
-        if (os.path.normcase(os.path.abspath(current_target)) !=
-                os.path.normcase(os.path.abspath(expected_target)) or
-                not safety.is_within_root(str(root), current_target)):
-            raise safety.InstallSafetyError("Shortcut does not target this installation")
+        # COM commonly expands 8.3 Windows names (RUNNER~1 -> runneradmin).
+        # Literal string comparison can reject identical existing files.
+        # Resolve Windows aliases only AFTER refusing reparse/symlink ancestors.
+        try:
+            if not os.path.isabs(current_target) or not os.path.isabs(expected_target):
+                raise safety.InstallSafetyError("Shortcut target must be absolute")
+            legacy._no_reparse_ancestors(current_target)
+            legacy._no_reparse_ancestors(expected_target)
+            if (not os.path.samefile(current_target, expected_target)
+                    or not legacy._inside(root, current_target)
+                    or not legacy._inside(root, expected_target)):
+                raise safety.InstallSafetyError(
+                    "Shortcut does not target the owned installation"
+                )
+        except (OSError, legacy.MigrationBlocked) as exc:
+            raise safety.InstallSafetyError(
+                "Shortcut target cannot be safely resolved"
+            ) from exc
         owned_shortcuts.append((str(link_path), True))
     if not manifest["created_root"]:
         raise safety.InstallSafetyError("Only dedicated created install roots supported")
