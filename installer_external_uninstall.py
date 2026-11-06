@@ -9,7 +9,7 @@ Unlike the old batch entrypoint, this coordinator invokes the verified
 PowerShell helper directly and THEN deletes the last verified batch launcher. The preflight is STRICT:
 every on-disk file must match the HKCU-bound manifest and no unexpected
 directory or link is accepted. Shortcut-owning installations are blocked;
-existing startup-value handling remains in the F01 verified helper.
+shortcut ownership is verified against F01's HKCU-bound SHA256/target\nrecords; existing startup-value handling remains in its verified helper.
 
 Security model: same-user HKCU authority (as in F01); a malicious same-user
 process can race registry and filesystem writes. Lock is cooperative only.
@@ -100,9 +100,41 @@ def _anchored_preflight(root, anchor_key):
         current = current.parent
     manifest = safety.load_manifest(str(root), expected_app_name=safety.DEFAULT_APP_NAME)
     safety.verify_install_anchor(str(root), manifest, anchor_key)
-    if manifest["shortcuts"]:
-        # Production shortcut handling is not yet part of this coordinator.
-        raise safety.InstallSafetyError("Shortcut-owning installation not supported")
+    # Only shortcuts that F01 recorded with BOTH install-time bytes and
+    # target can be considered owned. This is NOT legacy-shortcut adoption:
+    # old pre-manifest shortcuts still have no ownership proof and are refused.
+    owned_shortcuts = []
+    known_shortcut_paths = set()
+    for link in manifest["shortcuts"]:
+        link_path = Path(safety.validate_shortcut_path(link["path"]))
+        link_id = os.path.normcase(str(link_path))
+        if link_id in known_shortcut_paths:
+            raise safety.InstallSafetyError("Duplicate shortcut ownership record")
+        known_shortcut_paths.add(link_id)
+        original_hash = link.get("sha256")
+        expected_target = link.get("target")
+        if not original_hash or not expected_target:
+            raise safety.InstallSafetyError(
+                "Shortcut has no verified install-time ownership record"
+            )
+        if not os.path.lexists(link_path):
+            # A user may already have removed an installer-owned shortcut.
+            owned_shortcuts.append((str(link_path), False))
+            continue
+        _safe_file(link_path)
+        if safety.sha256_file(str(link_path)) != original_hash:
+            raise safety.InstallSafetyError("Installer-owned shortcut was modified")
+        try:
+            current_target = safety.read_shortcut_target(str(link_path))
+        except OSError as exc:
+            raise safety.InstallSafetyError(
+                "Cannot verify shortcut target"
+            ) from exc
+        if (os.path.normcase(os.path.abspath(current_target)) !=
+                os.path.normcase(os.path.abspath(expected_target)) or
+                not safety.is_within_root(str(root), current_target)):
+            raise safety.InstallSafetyError("Shortcut does not target this installation")
+        owned_shortcuts.append((str(link_path), True))
     if not manifest["created_root"]:
         raise safety.InstallSafetyError("Only dedicated created install roots supported")
 
@@ -156,7 +188,8 @@ def _anchored_preflight(root, anchor_key):
     if encountered_dirs != dirs:
         raise safety.InstallSafetyError("Owned install directory missing")
     return {"manifest": manifest, "launcher_sha": entries[
-        _normalized(safety.UNINSTALL_CMD_FILENAME)]}
+        _normalized(safety.UNINSTALL_CMD_FILENAME)],
+        "owned_shortcuts": owned_shortcuts}
 
 
 def _assert_anchor_retired(anchor_key):
@@ -213,6 +246,14 @@ def complete_verified_uninstall(root, anchor_key, *, consent=None):
                 "Safe uninstall stopped; recovery resources may remain"
             )
         _assert_anchor_retired(anchor_key)
+        # A successful helper must have retired every present, install-owned
+        # shortcut. A new/foreign link appearing at an old pathname is never
+        # touched by this coordinator and blocks the success verdict.
+        for shortcut_path, _was_present in prepared["owned_shortcuts"]:
+            if os.path.lexists(shortcut_path):
+                raise safety.InstallSafetyError(
+                    "Owned shortcut still exists after helper; manual inspection required"
+                )
         if not folder.is_dir() or safety.is_reparse_point(str(folder)):
             raise safety.InstallSafetyError("Uninstall root changed unexpectedly")
         remaining = list(folder.iterdir())
