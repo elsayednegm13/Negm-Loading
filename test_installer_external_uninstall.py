@@ -174,8 +174,12 @@ class TestExternalOwnedUninstall(unittest.TestCase):
         )
         manifest = safety.load_manifest(str(self.root))
         self.assertEqual(len(manifest["shortcuts"]), 1)
-        self.assertEqual(manifest["shortcuts"][0]["target"],
-                         str(self.root / safety.DEFAULT_APP_EXE_FILENAME))
+        # Windows Shell resolves 8.3 (RUNNER~1) to the long profile name.
+        # Verify actual file identity, not textual spelling of TEMP aliases.
+        self.assertTrue(os.path.samefile(
+            manifest["shortcuts"][0]["target"],
+            self.root / safety.DEFAULT_APP_EXE_FILENAME,
+        ))
         self.assertTrue(manifest["shortcuts"][0]["sha256"])
         return path
 
