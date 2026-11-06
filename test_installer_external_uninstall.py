@@ -239,6 +239,21 @@ class TestExternalOwnedUninstall(unittest.TestCase):
                 self.run_remove()
         self.assert_still_installed()
 
+    def test_long_and_short_windows_path_spellings_share_uninstall_lock(self):
+        # The runner may provide its temp directory via an 8.3 alias.
+        # A concurrent owner must not evade the cooperative lock by using a
+        # long-name spelling of the SAME filesystem location.
+        long_name = os.path.realpath(self.root)
+        self.assertEqual(
+            coordinator._lock_filename(self.root, self.key),
+            coordinator._lock_filename(long_name, self.key),
+        )
+        with coordinator._uninstall_lock(self.root, self.key):
+            with self.assertRaises(safety.InstallSafetyError):
+                with coordinator._uninstall_lock(long_name, self.key):
+                    self.fail("Equivalent Windows paths acquired separate locks")
+        self.assert_still_installed()
+
     def test_unexpected_subprocess_success_must_not_bypass_anchor_check(self):
         with mock.patch.object(
             coordinator.subprocess, "run",
