@@ -1263,6 +1263,15 @@ exit /b %EC%\r
 echo MANUAL CLEANUP REQUIRED: missing uninstall helper. Exit code 2.\r
 exit /b 2\r
 :Announce\r
+rem Only after the helper verified owned files, recovery hashes and HKCU.\r
+rem Never delete any file other than this own manifest-verified batch launcher.\r
+if /I not "%~nx0"=="__CMD_NAME__" goto FinalReported\r
+del /f /q "%~f0" >nul 2>&1\r
+if exist "%~f0" goto FinalReported\r
+if "__CREATED_ROOT__"=="1" (\r
+    rd "%~dp0" >nul 2>&1\r
+    if exist "%~dp0" goto FinalReported\r
+)\r
 echo __APP_NAME__ owned files were removed.\r
 exit /b 0\r
 :FinalReported\r
@@ -1273,7 +1282,9 @@ exit /b 4\r
 
 def generate_uninstall_cmd(app_name=DEFAULT_APP_NAME, created_root=False):
     app = _require_safe_app_name(app_name)
-    cmd = _CMD_TEMPLATE.replace("__APP_NAME__", app).replace("__PS1__", UNINSTALL_PS1_FILENAME)
+    cmd = (_CMD_TEMPLATE.replace("__APP_NAME__", app)
+           .replace("__PS1__", UNINSTALL_PS1_FILENAME)
+           .replace("__CMD_NAME__", UNINSTALL_CMD_FILENAME))
     cmd = cmd.replace("__CREATED_ROOT__", "1" if created_root else "0")
     if script_contains_forbidden_deletion(cmd):
         raise InstallSafetyError("generated uninstall.cmd failed self-check")
@@ -1559,6 +1570,31 @@ if ($manifest.version -ne 1 -or [StringComparer]::Ordinal.Compare([string]$manif
 if (-not (Test-Anchor $manifest)) {
     Write-Host 'MANUAL CLEANUP REQUIRED: install manifest is not bound to the install-time anchor. Exit code 2.'
     exit 2
+}
+
+# Before any deletion, verify both recovery scripts against the anchored
+# manifest; a user-modified batch file must never be silently deleted.
+foreach ($recoveryName in @($CmdName, $HelperName)) {
+    $matching = @($manifest.files | Where-Object {
+        [StringComparer]::OrdinalIgnoreCase.Compare([string]$_.path, $recoveryName) -eq 0
+    })
+    if ($matching.Count -ne 1) {
+        Write-Host 'MANUAL CLEANUP REQUIRED: uninstall artifact inventory is untrusted. Exit code 2.'
+        exit 2
+    }
+    try {
+        $recoveryPath = Resolve-Owned $recoveryName
+        if ((Test-Reparse $recoveryPath) -or -not (Test-Path -LiteralPath $recoveryPath -PathType Leaf)) {
+            throw 'Missing or linked uninstall artifact'
+        }
+        $actualRecoveryHash = Get-FileSha256 $recoveryPath
+        if ($actualRecoveryHash -ne ([string]$matching[0].sha256).ToLowerInvariant()) {
+            throw 'Modified uninstall artifact'
+        }
+    } catch {
+        Write-Host 'MANUAL CLEANUP REQUIRED: modified or unreadable uninstall artifact. Exit code 2.'
+        exit 2
+    }
 }
 
 try {
