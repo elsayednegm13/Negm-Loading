@@ -1262,21 +1262,19 @@ exit /b %EC%\r
 :MissingHelper\r
 echo MANUAL CLEANUP REQUIRED: missing uninstall helper. Exit code 2.\r
 exit /b 2\r
-:Announce\r
-rem Only after the helper verified owned files, recovery hashes and HKCU.\r
-rem Never delete any file other than this own manifest-verified batch launcher.\r
-if /I not "%~nx0"=="__CMD_NAME__" goto FinalReported\r
-del /f /q "%~f0" >nul 2>&1\r
-if exist "%~f0" goto FinalReported\r
-if "__CREATED_ROOT__"=="1" (\r
-    rd "%~dp0" >nul 2>&1\r
-    if exist "%~dp0" goto FinalReported\r
-)\r
-echo __APP_NAME__ owned files were removed.\r
-exit /b 0\r
 :FinalReported\r
 echo MANUAL CLEANUP REQUIRED: payload was removed but final cleanup is incomplete. Recovery scripts were kept. Exit code 4.\r
 exit /b 4\r
+:Announce\r
+rem PowerShell has already verified this batch's SHA-256 against the HKCU-bound manifest.\r
+rem Make self-deletion the LAST compound command; cmd.exe must not read a\r
+rem further label or exit after deleting the script it is executing.\r
+if /I not "%~nx0"=="__CMD_NAME__" goto FinalReported\r
+if "__CREATED_ROOT__"=="1" (\r
+    del /f /q "%~f0" >nul 2>&1 && rd "%~dp0" >nul 2>&1\r
+) else (\r
+    del /f /q "%~f0" >nul 2>&1\r
+)\r
 """
 
 
